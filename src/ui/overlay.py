@@ -36,9 +36,23 @@ _BOTTOM_MARGIN_PX = 48
 _CHROME_CONTROLS_HEIGHT = 44
 # Evita parpadeo al cruzar widgets o al abrir un popup.
 _CHROME_HIDE_DELAY_MS = 400
+# Aparición/desaparición del hueco del chrome (captions no reflow).
+_CHROME_ANIM_MS = 200
 
 # (left, right, top, bottom)
 ResizeEdge = tuple[bool, bool, bool, bool]
+
+
+class _ChromeSlot(QtWidgets.QWidget):
+    """Hueco animable: la sizeHint vertical sigue el alto fijado (puede ser 0)."""
+
+    def sizeHint(self) -> QtCore.QSize:
+        hint = super().sizeHint()
+        return QtCore.QSize(hint.width(), self.height())
+
+    def minimumSizeHint(self) -> QtCore.QSize:
+        hint = super().minimumSizeHint()
+        return QtCore.QSize(hint.width(), self.minimumHeight())
 
 
 class SubtitleOverlay(QtWidgets.QWidget):
@@ -85,6 +99,12 @@ class SubtitleOverlay(QtWidgets.QWidget):
         self._chrome_hide_timer = QtCore.QTimer(self)
         self._chrome_hide_timer.setSingleShot(True)
         self._chrome_hide_timer.timeout.connect(self._hide_chrome_bar)
+        self._chrome_slot_px = 0
+        self._chrome_target_visible = False
+        self._chrome_anim = QtCore.QVariantAnimation(self)
+        self._chrome_anim.setDuration(_CHROME_ANIM_MS)
+        self._chrome_anim.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
+        self._chrome_anim.valueChanged.connect(self._on_chrome_slot_value)
         self._build_ui()
         self._apply_style()
         self._build_context_menu()
@@ -135,6 +155,68 @@ class SubtitleOverlay(QtWidgets.QWidget):
         panel_layout = QtWidgets.QVBoxLayout(self.panel)
         pad = int(self.config.get("padding", 24))
         panel_layout.setContentsMargins(pad, pad // 2, pad, pad // 2)
+        # Sin spacing: el chrome colapsado a 0 no debe dejar un hueco fantasma de 6px.
+        panel_layout.setSpacing(0)
+
+        self.chrome_bar = _ChromeSlot()
+        self.chrome_bar.setObjectName("chromeBar")
+        self.chrome_bar.setMouseTracking(True)
+        self.chrome_bar.setFixedHeight(0)
+        self.chrome_bar.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        top = QtWidgets.QHBoxLayout(self.chrome_bar)
+        top.setContentsMargins(6, 4, 6, 4)
+        top.setSpacing(6)
+
+        self.lang_label = QtWidgets.QLabel(
+            str(self.config.get("language", "en")).upper()
+        )
+        self.lang_label.setObjectName("langLabel")
+        self.lang_label.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.lang_label.setToolTip("Clic para cambiar idioma ASR")
+        top.addWidget(self.lang_label)
+
+        self.translate_btn = QtWidgets.QPushButton("ES")
+        self.translate_btn.setObjectName("translateToggle")
+        self.translate_btn.setCheckable(True)
+        self.translate_btn.setChecked(
+            bool(self.config.get("translation_enabled", False))
+        )
+        self.translate_btn.setFixedWidth(36)
+        self.translate_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.translate_btn.setToolTip("Traducir a español (solo texto confirmado)")
+        self.translate_btn.toggled.connect(self._on_translate_toggled)
+        top.addWidget(self.translate_btn)
+
+        self.preset_selector = QtWidgets.QComboBox()
+        self.preset_selector.setObjectName("presetSelector")
+        self.preset_selector.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.preset_selector.setToolTip("Preset general: se aplica al elegirlo")
+        self.preset_selector.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self._refresh_preset_selector()
+        self.preset_selector.currentIndexChanged.connect(self._on_preset_selected)
+        top.addWidget(self.preset_selector)
+        top.addStretch(1)
+
+        self.settings_btn = QtWidgets.QPushButton("⚙")
+        self.settings_btn.setFixedWidth(36)
+        self.settings_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.settings_btn.clicked.connect(self._handle_settings)
+        self.close_btn = QtWidgets.QPushButton("✕")
+        self.close_btn.setFixedWidth(36)
+        self.close_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.close_btn.clicked.connect(self._handle_close)
+        top.addWidget(self.settings_btn)
+        top.addWidget(self.close_btn)
+        self._chrome_opacity = QtWidgets.QGraphicsOpacityEffect(self.chrome_bar)
+        self._chrome_opacity.setOpacity(0.0)
+        self.chrome_bar.setGraphicsEffect(self._chrome_opacity)
+        self.chrome_bar.hide()
+        panel_layout.addWidget(self.chrome_bar)
 
         self.debug_hud_label = QtWidgets.QLabel("")
         self.debug_hud_label.setObjectName("debugHud")
@@ -193,60 +275,6 @@ class SubtitleOverlay(QtWidgets.QWidget):
 
         panel_layout.addWidget(self.notice_label)
         panel_layout.addWidget(self._caption_scroll, stretch=1)
-
-        # Flota sobre el panel: no ocupa layout → captions no saltan al revelar.
-        self.chrome_bar = QtWidgets.QWidget(self.panel)
-        self.chrome_bar.setObjectName("chromeBar")
-        self.chrome_bar.setMouseTracking(True)
-        top = QtWidgets.QHBoxLayout(self.chrome_bar)
-        top.setContentsMargins(6, 4, 6, 4)
-        top.setSpacing(6)
-
-        self.lang_label = QtWidgets.QLabel(
-            str(self.config.get("language", "en")).upper()
-        )
-        self.lang_label.setObjectName("langLabel")
-        self.lang_label.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.lang_label.setToolTip("Clic para cambiar idioma ASR")
-        top.addWidget(self.lang_label)
-
-        self.translate_btn = QtWidgets.QPushButton("ES")
-        self.translate_btn.setObjectName("translateToggle")
-        self.translate_btn.setCheckable(True)
-        self.translate_btn.setChecked(
-            bool(self.config.get("translation_enabled", False))
-        )
-        self.translate_btn.setFixedWidth(36)
-        self.translate_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.translate_btn.setToolTip("Traducir a español (solo texto confirmado)")
-        self.translate_btn.toggled.connect(self._on_translate_toggled)
-        top.addWidget(self.translate_btn)
-
-        self.preset_selector = QtWidgets.QComboBox()
-        self.preset_selector.setObjectName("presetSelector")
-        self.preset_selector.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.preset_selector.setToolTip("Preset general: se aplica al elegirlo")
-        self.preset_selector.setSizeAdjustPolicy(
-            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents
-        )
-        self._refresh_preset_selector()
-        self.preset_selector.currentIndexChanged.connect(self._on_preset_selected)
-        top.addWidget(self.preset_selector)
-        top.addStretch(1)
-
-        self.settings_btn = QtWidgets.QPushButton("⚙")
-        self.settings_btn.setFixedWidth(36)
-        self.settings_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.settings_btn.clicked.connect(self._handle_settings)
-        self.close_btn = QtWidgets.QPushButton("✕")
-        self.close_btn.setFixedWidth(36)
-        self.close_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.close_btn.clicked.connect(self._handle_close)
-        top.addWidget(self.settings_btn)
-        top.addWidget(self.close_btn)
-        self.chrome_bar.hide()
-        self._position_chrome_bar()
-
         root.addWidget(self.panel)
 
         for widget in (
@@ -337,35 +365,46 @@ class SubtitleOverlay(QtWidgets.QWidget):
     def _restore_position(self) -> None:
         self._restore_geometry()
 
+    def _base_window_height(self) -> int:
+        """Altura persistida: sin el hueco temporal del chrome."""
+        return max(_MIN_WINDOW_HEIGHT, self.height() - self._chrome_slot_px)
+
     def _schedule_persist_geometry(self) -> None:
         if self._ignore_move_save or not self.isVisible():
             return
         self.config["window_pos"] = [self.x(), self.y()]
         self.config["window_width"] = self.width()
-        self.config["window_height"] = self.height()
+        self.config["window_height"] = self._base_window_height()
         self._save_pos_timer.start(250)
 
     def _persist_geometry(self) -> None:
         self.config["window_pos"] = [self.x(), self.y()]
         self.config["window_width"] = self.width()
-        self.config["window_height"] = self.height()
+        self.config["window_height"] = self._base_window_height()
         if self.on_save_config is not None:
             self.on_save_config(self.config)
 
     def _reapply_flags(self, *, show_again: bool) -> None:
         """setWindowFlags recrea la ventana nativa y pierde geometría si no se restaura."""
+        was_chrome = self._chrome_target_visible
         if self.isVisible():
             self.config["window_pos"] = [self.x(), self.y()]
             self.config["window_width"] = self.width()
-            self.config["window_height"] = self.height()
+            self.config["window_height"] = self._base_window_height()
         self._ignore_move_save = True
         try:
             self.setWindowFlags(self._window_flags())
+            self._chrome_slot_px = 0
+            self._chrome_target_visible = False
+            self.chrome_bar.setFixedHeight(0)
+            self._chrome_opacity.setOpacity(0.0)
             self._restore_geometry()
             if show_again:
                 self.show()
         finally:
             self._ignore_move_save = False
+        if was_chrome:
+            self._reveal_chrome()
 
     def _build_context_menu(self) -> None:
         self._menu = QtWidgets.QMenu(self)
@@ -436,11 +475,10 @@ class SubtitleOverlay(QtWidgets.QWidget):
 
     def _reveal_chrome(self) -> None:
         self._chrome_hide_timer.stop()
-        if not self.chrome_bar.isHidden():
+        if self._chrome_target_visible:
             return
-        self._position_chrome_bar()
-        self.chrome_bar.show()
-        self.chrome_bar.raise_()
+        self._chrome_target_visible = True
+        self._animate_chrome_slot(_CHROME_CONTROLS_HEIGHT)
 
     def _schedule_hide_chrome(self) -> None:
         self._chrome_hide_timer.start(_CHROME_HIDE_DELAY_MS)
@@ -457,17 +495,55 @@ class SubtitleOverlay(QtWidgets.QWidget):
         if self._should_keep_chrome():
             self._chrome_hide_timer.start(_CHROME_HIDE_DELAY_MS)
             return
-        if self.chrome_bar.isHidden():
+        if not self._chrome_target_visible and self._chrome_slot_px == 0:
             return
-        self.chrome_bar.hide()
+        self._chrome_target_visible = False
+        self._animate_chrome_slot(0)
 
-    def _position_chrome_bar(self) -> None:
-        pad = int(self.config.get("padding", 24))
-        left = pad
-        top = pad // 2
-        width = max(self.panel.width() - 2 * pad, 80)
-        self.chrome_bar.setGeometry(left, top, width, _CHROME_CONTROLS_HEIGHT)
-        self.chrome_bar.raise_()
+    def _on_chrome_slot_value(self, value: object) -> None:
+        new = int(value)  # type: ignore[arg-type]
+        old = self._chrome_slot_px
+        if new == old:
+            return
+        delta = new - old
+        self._chrome_slot_px = new
+        if new > 0 and self.chrome_bar.isHidden():
+            self.chrome_bar.show()
+        self.chrome_bar.setFixedHeight(new)
+        t = new / _CHROME_CONTROLS_HEIGHT if _CHROME_CONTROLS_HEIGHT else 0.0
+        self._chrome_opacity.setOpacity(t)
+        self._grow_window_for_chrome(delta)
+        if new == 0:
+            self.chrome_bar.hide()
+
+    def _animate_chrome_slot(self, target: int) -> None:
+        target = max(0, min(int(target), _CHROME_CONTROLS_HEIGHT))
+        if (
+            self._chrome_anim.state() == QtCore.QAbstractAnimation.State.Running
+            and int(self._chrome_anim.endValue() or -1) == target
+        ):
+            return
+        if target > 0:
+            self.chrome_bar.show()
+        self._chrome_anim.stop()
+        self._chrome_anim.setStartValue(self._chrome_slot_px)
+        self._chrome_anim.setEndValue(target)
+        self._chrome_anim.start()
+
+    def _grow_window_for_chrome(self, delta: int) -> None:
+        """Crece/encoge hacia arriba para que el área de captions no cambie de tamaño."""
+        if delta == 0:
+            return
+        self._ignore_move_save = True
+        try:
+            geo = self.geometry()
+            # Borde inferior fijo: los subtítulos no se mueven en pantalla.
+            new_height = max(1, geo.height() + delta)
+            new_top = geo.y() - delta
+            self.setGeometry(geo.x(), new_top, geo.width(), new_height)
+        finally:
+            self._ignore_move_save = False
+        self._apply_caption_geometry()
 
     def enterEvent(self, event: QtGui.QEnterEvent) -> None:
         self._reveal_chrome()
@@ -585,9 +661,9 @@ class SubtitleOverlay(QtWidgets.QWidget):
         return font_size + _CAPTION_LINE_GAP_PX
 
     def _chrome_height(self) -> int:
-        """Margen fijo del panel (HUD/notice). El chrome flota y no resta viewport."""
+        """Padding + hueco actual del chrome (animado) + notice."""
         pad = int(self.config.get("padding", 24))
-        extra = pad
+        extra = pad + self._chrome_slot_px
         if self.notice_label.isVisible():
             extra += max(self.notice_label.sizeHint().height(), 18)
         return extra
@@ -844,7 +920,7 @@ class SubtitleOverlay(QtWidgets.QWidget):
                 font-family: monospace;
             }}
             QWidget#chromeBar {{
-                background: rgba(0, 0, 0, 0.45);
+                background: transparent;
                 border-radius: 8px;
             }}
             QPushButton#translateToggle {{
@@ -914,7 +990,6 @@ class SubtitleOverlay(QtWidgets.QWidget):
         self._sync_translation_ui()
         self._sync_debug_hud()
         self._apply_caption_geometry()
-        self._position_chrome_bar()
         desired = bool(config.get("always_on_top", True))
         if desired != self._always_on_top:
             self.set_always_on_top(desired)
@@ -1266,7 +1341,6 @@ class SubtitleOverlay(QtWidgets.QWidget):
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
         self._apply_caption_geometry()
-        self._position_chrome_bar()
 
     def _handle_mouse_press(self, event: QtGui.QMouseEvent, *, window_pos: QtCore.QPoint) -> bool:
         if event.button() == QtCore.Qt.MouseButton.RightButton:
@@ -1283,7 +1357,8 @@ class SubtitleOverlay(QtWidgets.QWidget):
         return self._begin_drag(event)
 
     def _handle_mouse_move(self, event: QtGui.QMouseEvent, *, window_pos: QtCore.QPoint) -> bool:
-        self._reveal_chrome()
+        if self._resize_edge is None and self._drag_offset is None:
+            self._reveal_chrome()
         if (
             self._resize_edge is not None
             and event.buttons() & QtCore.Qt.MouseButton.LeftButton
