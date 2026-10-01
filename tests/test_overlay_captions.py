@@ -1208,6 +1208,7 @@ def test_chrome_slot_anim_preserves_caption_height(
     ov.resize(800, 220)
     ov._apply_caption_geometry()
     caption_h = ov._caption_scroll.height()
+    base_h = ov.height()
     assert ov._chrome_slot_px == 0
     assert not ov._chrome_target_visible
 
@@ -1216,11 +1217,35 @@ def test_chrome_slot_anim_preserves_caption_height(
     assert ov._chrome_target_visible
     assert ov._chrome_slot_px == _CHROME_CONTROLS_HEIGHT
     assert ov._caption_scroll.height() == caption_h
-    assert ov.height() >= 220 + _CHROME_CONTROLS_HEIGHT
+    assert ov.height() == base_h + _CHROME_CONTROLS_HEIGHT
 
+    ov._chrome_pointer_inside = False
     ov._hide_chrome_bar()
     qapp.processEvents()
     assert not ov._chrome_target_visible
     assert ov._chrome_slot_px == 0
     assert ov._caption_scroll.height() == caption_h
+    assert ov.height() == base_h
+    ov.close()
+
+
+def test_chrome_reveal_hide_cycle_does_not_accumulate_height(
+    qapp: QtWidgets.QApplication,
+) -> None:
+    from src.ui.overlay import _CHROME_CONTROLS_HEIGHT
+
+    ov, _ = _overlay(qapp)
+    ov._chrome_hide_timer.stop()
+    ov._chrome_anim.setDuration(0)
+    ov.resize(800, 200)
+    base_h = ov.height()
+    for _ in range(3):
+        ov._reveal_chrome()
+        qapp.processEvents()
+        assert ov.height() == base_h + _CHROME_CONTROLS_HEIGHT
+        ov._chrome_pointer_inside = False
+        ov._hide_chrome_bar()
+        qapp.processEvents()
+        assert ov.height() == base_h
+        assert ov._chrome_slot_px == 0
     ov.close()

@@ -101,10 +101,14 @@ class SubtitleOverlay(QtWidgets.QWidget):
         self._chrome_hide_timer.timeout.connect(self._hide_chrome_bar)
         self._chrome_slot_px = 0
         self._chrome_target_visible = False
+        self._chrome_pointer_inside = False
+        self._chrome_base_height = 0
+        self._chrome_anchor_bottom = 0
         self._chrome_anim = QtCore.QVariantAnimation(self)
         self._chrome_anim.setDuration(_CHROME_ANIM_MS)
         self._chrome_anim.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
         self._chrome_anim.valueChanged.connect(self._on_chrome_slot_value)
+        self._chrome_anim.finished.connect(self._on_chrome_anim_finished)
         self._build_ui()
         self._apply_style()
         self._build_context_menu()
@@ -396,8 +400,11 @@ class SubtitleOverlay(QtWidgets.QWidget):
             self.setWindowFlags(self._window_flags())
             self._chrome_slot_px = 0
             self._chrome_target_visible = False
+            self._chrome_base_height = 0
+            self._chrome_anchor_bottom = 0
             self.chrome_bar.setFixedHeight(0)
             self._chrome_opacity.setOpacity(0.0)
+            self.chrome_bar.hide()
             self._restore_geometry()
             if show_again:
                 self.show()
@@ -478,13 +485,14 @@ class SubtitleOverlay(QtWidgets.QWidget):
         if self._chrome_target_visible:
             return
         self._chrome_target_visible = True
+        self._capture_chrome_anchor()
         self._animate_chrome_slot(_CHROME_CONTROLS_HEIGHT)
 
     def _schedule_hide_chrome(self) -> None:
         self._chrome_hide_timer.start(_CHROME_HIDE_DELAY_MS)
 
     def _should_keep_chrome(self) -> bool:
-        if self.underMouse():
+        if self._chrome_pointer_inside:
             return True
         if self._menu.isVisible():
             return True
@@ -498,23 +506,44 @@ class SubtitleOverlay(QtWidgets.QWidget):
         if not self._chrome_target_visible and self._chrome_slot_px == 0:
             return
         self._chrome_target_visible = False
+        self._capture_chrome_anchor()
         self._animate_chrome_slot(0)
 
+    def _capture_chrome_anchor(self) -> None:
+        """Ancla el borde inferior y la altura base (sin chrome) para la animación."""
+        self._chrome_base_height = max(
+            _MIN_WINDOW_HEIGHT, self.height() - self._chrome_slot_px
+        )
+        self._chrome_anchor_bottom = self.y() + self.height()
+
     def _on_chrome_slot_value(self, value: object) -> None:
-        new = int(value)  # type: ignore[arg-type]
-        old = self._chrome_slot_px
-        if new == old:
+        new = int(round(float(value)))  # type: ignore[arg-type]
+        new = max(0, min(new, _CHROME_CONTROLS_HEIGHT))
+        if new == self._chrome_slot_px:
             return
-        delta = new - old
         self._chrome_slot_px = new
         if new > 0 and self.chrome_bar.isHidden():
             self.chrome_bar.show()
         self.chrome_bar.setFixedHeight(new)
         t = new / _CHROME_CONTROLS_HEIGHT if _CHROME_CONTROLS_HEIGHT else 0.0
         self._chrome_opacity.setOpacity(t)
-        self._grow_window_for_chrome(delta)
+        self._apply_chrome_window_geometry()
         if new == 0:
             self.chrome_bar.hide()
+
+    def _on_chrome_anim_finished(self) -> None:
+        target = 0 if not self._chrome_target_visible else _CHROME_CONTROLS_HEIGHT
+        if self._chrome_slot_px != target:
+            self._chrome_slot_px = target
+            self.chrome_bar.setFixedHeight(target)
+            self._chrome_opacity.setOpacity(
+                1.0 if target else 0.0
+            )
+            if target == 0:
+                self.chrome_bar.hide()
+            elif self.chrome_bar.isHidden():
+                self.chrome_bar.show()
+        self._apply_chrome_window_geometry()
 
     def _animate_chrome_slot(self, target: int) -> None:
         target = max(0, min(int(target), _CHROME_CONTROLS_HEIGHT))
@@ -526,30 +555,34 @@ class SubtitleOverlay(QtWidgets.QWidget):
         if target > 0:
             self.chrome_bar.show()
         self._chrome_anim.stop()
-        self._chrome_anim.setStartValue(self._chrome_slot_px)
-        self._chrome_anim.setEndValue(target)
+        self._chrome_anim.setStartValue(float(self._chrome_slot_px))
+        self._chrome_anim.setEndValue(float(target))
         self._chrome_anim.start()
 
-    def _grow_window_for_chrome(self, delta: int) -> None:
-        """Crece/encoge hacia arriba para que el área de captions no cambie de tamaño."""
-        if delta == 0:
-            return
+    def _apply_chrome_window_geometry(self) -> None:
+        """Altura = base + slot; borde inferior fijo (no acumular deltas)."""
+        if self._chrome_base_height <= 0:
+            self._capture_chrome_anchor()
+        new_height = self._chrome_base_height + self._chrome_slot_px
+        new_top = self._chrome_anchor_bottom - new_height
         self._ignore_move_save = True
         try:
-            geo = self.geometry()
-            # Borde inferior fijo: los subtítulos no se mueven en pantalla.
-            new_height = max(1, geo.height() + delta)
-            new_top = geo.y() - delta
-            self.setGeometry(geo.x(), new_top, geo.width(), new_height)
+            # move+resize es más fiable que setGeometry al encoger en X11/XWayland.
+            if self.height() != new_height:
+                self.resize(self.width(), new_height)
+            if self.y() != new_top or self.height() != new_height:
+                self.setGeometry(self.x(), new_top, self.width(), new_height)
         finally:
             self._ignore_move_save = False
         self._apply_caption_geometry()
 
     def enterEvent(self, event: QtGui.QEnterEvent) -> None:
+        self._chrome_pointer_inside = True
         self._reveal_chrome()
         super().enterEvent(event)
 
     def leaveEvent(self, event: QtCore.QEvent) -> None:
+        self._chrome_pointer_inside = False
         self._schedule_hide_chrome()
         super().leaveEvent(event)
 
