@@ -1195,3 +1195,20 @@ def test_preset_warning_shows_notice(qapp: QtWidgets.QApplication) -> None:
     assert not ov.notice_label.isHidden()
     assert ov.notice_label.text() == "monitor ausente"
     ov.close()
+
+
+def test_chrome_bar_floats_without_reflow(qapp: QtWidgets.QApplication) -> None:
+    ov, _ = _overlay(qapp)
+    ov._chrome_hide_timer.stop()
+    assert ov.chrome_bar.isHidden()
+    before = ov._chrome_height()
+    ov.resize(800, 240)
+    ov._reveal_chrome()
+    assert not ov.chrome_bar.isHidden()
+    assert ov._chrome_height() == before
+    assert ov.chrome_bar.parent() is ov.panel
+    assert ov.chrome_bar.width() > 0
+    ov._hide_chrome_bar()
+    assert ov.chrome_bar.isHidden()
+    assert ov._chrome_height() == before
+    ov.close()
