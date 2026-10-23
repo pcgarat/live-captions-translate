@@ -23,22 +23,34 @@ from src.config import (
     FONT_WEIGHT_LABELS,
     FONT_WEIGHT_MODES,
     LATENCY_FACTORY_PRESETS,
+    SECOND_LINE_LABELS,
     SECOND_LINE_MODES,
     TEXT_ALIGN_LABELS,
     TRANSLATION_FACTORY_PRESETS,
     TRANSLATION_PRESET_LABELS,
-    TRANSLATION_RESERVED_PRESET_IDS,
     TRANSLATION_STICKY_LABELS,
     TRANSLATION_STICKY_MODES,
     add_translation_user_preset,
+    delete_latency_user_preset,
     delete_translation_user_preset,
-    effective_latency_profile,
-    effective_translation_decode,
+    latency_preset_label,
     list_app_preset_ids,
-    reset_latency_profile,
-    slugify_translation_preset_name,
-    translation_user_preset_ids,
+    save_latency_preset,
+    save_latency_preset_as,
+    save_translation_preset,
     validate_config,
+)
+from src.preset_state import (
+    DOMAIN_APP,
+    DOMAIN_DECODE,
+    DOMAIN_LATENCY,
+    describe,
+    domain_preset_ids,
+    is_deletable,
+    is_factory,
+    is_modified,
+    is_partial,
+    preset_label,
 )
 from src.presets import app_preset_label, is_factory_preset
 from src.ui.branding import load_brand_logo_pixmap, repo_or_app_root
@@ -46,6 +58,15 @@ from src.ui.fonts import (
     available_caption_fonts,
     font_family_qss,
     font_weight_css,
+)
+from src.ui.presets_ui import (
+    CHOICE_NEW,
+    CHOICE_OVERWRITE,
+    ActionState,
+    PresetActionBar,
+    PresetValuesDialog,
+    ask_preset_name,
+    ask_save_choice,
 )
 
 HINT_TRANSLATOR_MODEL = (
@@ -491,10 +512,8 @@ CONTROL_WIDTH = {
 }
 # Espacio uniforme: selector↔botones y botones↔botones.
 CONTROL_ACTION_GAP = 6
-# Columna de control: selector lg + hasta 3 botones icono (presets).
-CONTROL_SLOT_WIDTH = (
-    CONTROL_WIDTH["lg"] + 3 * CONTROL_HEIGHT + 3 * CONTROL_ACTION_GAP
-)
+# Columna de control: selector lg + hasta 4 botones icono (ver/guardar/restaurar/borrar).
+CONTROL_SLOT_WIDTH = CONTROL_WIDTH["lg"] + 4 * CONTROL_HEIGHT + 4 * CONTROL_ACTION_GAP
 
 
 def _set_control_height(widget: QtWidgets.QWidget) -> None:
@@ -538,7 +557,11 @@ def _combo_actions_row(
     combo: QtWidgets.QComboBox,
     *buttons: QtWidgets.QWidget,
 ) -> QtWidgets.QWidget:
-    """Selector + botones a la derecha con el mismo margen entre todos."""
+    """Selector + botones a la derecha con el mismo margen entre todos.
+
+    Sin ancho fijo: los botones de preset aparecen y desaparecen según el estado
+    del preset, así que el ancho lo negocia el layout.
+    """
     wrap = QtWidgets.QWidget()
     row = QtWidgets.QHBoxLayout(wrap)
     row.setContentsMargins(0, 0, 0, 0)
@@ -546,16 +569,9 @@ def _combo_actions_row(
     row.addWidget(combo, stretch=0)
     for button in buttons:
         row.addWidget(button, stretch=0)
-    # Ancho por tamaños reales (no asumir CONTROL_HEIGHT): si el wrap queda
-    # corto, Qt comprime el spacing y el selector queda pegado al 1.er botón.
-    combo_w = max(combo.minimumWidth(), combo.width())
-    buttons_w = sum(
-        max(btn.minimumWidth(), btn.width(), CONTROL_HEIGHT) for btn in buttons
-    )
-    width = combo_w + buttons_w + len(buttons) * CONTROL_ACTION_GAP
-    wrap.setFixedWidth(width)
+    row.addStretch(1)
     wrap.setSizePolicy(
-        QtWidgets.QSizePolicy.Policy.Fixed,
+        QtWidgets.QSizePolicy.Policy.Maximum,
         QtWidgets.QSizePolicy.Policy.Preferred,
     )
     return wrap
@@ -611,60 +627,6 @@ def _alignment_icon(mode: str, *, size: int = 20, color: str = "#c5cad6") -> QtG
         painter.drawLine(x1, y, x2, y)
     painter.end()
     return QtGui.QIcon(pm)
-
-
-def _preset_action_icon(
-    kind: str, *, size: int = 18, color: str = "#c5cad6"
-) -> QtGui.QIcon:
-    """Iconos: save | save_as | delete | reset."""
-    pm = QtGui.QPixmap(size, size)
-    pm.fill(QtCore.Qt.GlobalColor.transparent)
-    painter = QtGui.QPainter(pm)
-    painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-    pen = QtGui.QPen(QtGui.QColor(color))
-    pen.setWidthF(1.6)
-    pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
-    pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
-    painter.setPen(pen)
-    painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
-
-    if kind in {"save", "save_as"}:
-        painter.drawRoundedRect(3, 2, 12, 14, 1.5, 1.5)
-        painter.drawRect(6, 2, 6, 4)
-        painter.drawLine(6, 12, 12, 12)
-        if kind == "save_as":
-            painter.drawLine(14, 4, 14, 8)
-            painter.drawLine(12, 6, 16, 6)
-    elif kind == "reset":
-        # Arco con flecha (restablecer).
-        rect = QtCore.QRectF(3.5, 3.5, 11, 11)
-        painter.drawArc(rect, 40 * 16, 280 * 16)
-        painter.drawLine(13, 4, 15, 6)
-        painter.drawLine(13, 4, 11, 6)
-    else:
-        painter.drawLine(5, 5, 13, 5)
-        painter.drawLine(7, 5, 7, 3)
-        painter.drawLine(11, 5, 11, 3)
-        painter.drawLine(6, 3, 12, 3)
-        painter.drawRoundedRect(5, 5, 8, 10, 1.2, 1.2)
-        painter.drawLine(8, 7, 8, 12)
-        painter.drawLine(10, 7, 10, 12)
-
-    painter.end()
-    return QtGui.QIcon(pm)
-
-
-def _make_icon_tool_button(*, name: str, icon_kind: str) -> QtWidgets.QPushButton:
-    btn = QtWidgets.QPushButton()
-    btn.setObjectName("IconToolButton")
-    btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-    btn.setAccessibleName(name)
-    btn.setToolTip(name)
-    btn.setIcon(_preset_action_icon(icon_kind))
-    btn.setIconSize(QtCore.QSize(16, 16))
-    btn.setFixedSize(CONTROL_HEIGHT, CONTROL_HEIGHT)
-    btn.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
-    return btn
 
 
 class MarqueeToggle(QtWidgets.QAbstractButton):
@@ -1018,17 +980,35 @@ class SettingsDialog(QtWidgets.QDialog):
         self._loading_tx = False
         self._loading_app_preset = False
         self._guarding_mode_conflict = False
+        self._latency_draft: dict[str, Any] = {}
+        self._tx_draft: dict[str, Any] = {}
         self._prev_sticky_mode = str(
             self.tx_sticky_mode.currentData() or "off"
         )
         self.captions_show_partials.toggled.connect(self._on_show_partials_toggled)
         self.tx_sticky_mode.currentIndexChanged.connect(self._on_sticky_mode_changed)
-        self._load_profile_into_sliders(str(self.latency_mode.currentData()))
+        self._refresh_latency_preset_combo()
         self._refresh_translation_preset_combo()
-        self._load_translation_decode_into_spins()
-        self._sync_translation_preset_actions()
         self._refresh_app_preset_bar()
         self._refresh_preview()
+        # El estado «modificado» depende de widgets de todas las pestañas.
+        self._dirty_timer = QtCore.QTimer(self)
+        self._dirty_timer.setInterval(250)
+        self._dirty_timer.timeout.connect(self._sync_all_preset_actions)
+        self._dirty_timer.start()
+
+    def _sync_all_preset_actions(self) -> None:
+        self._sync_app_preset_actions()
+        self._sync_latency_actions()
+        self._sync_translation_preset_actions()
+
+    def _persist_preset_library(self) -> None:
+        """Un alta/borrado de preset debe sobrevivir a cancelar el diálogo."""
+        if self._controller is None:
+            return
+        persist = getattr(self._controller, "persist_preset_library_from_settings", None)
+        if callable(persist):
+            persist(self)
 
     def _build_app_preset_bar(self) -> QtWidgets.QWidget:
         bar = _Section("Preset general")
@@ -1037,30 +1017,20 @@ class SettingsDialog(QtWidgets.QDialog):
         _size_combo(self.app_preset, "lg")
         self.app_preset.currentIndexChanged.connect(self._on_app_preset_changed)
 
-        self.app_preset_save_btn = _make_icon_tool_button(
-            name="Guardar",
-            icon_kind="save",
-        )
-        self.app_preset_save_btn.clicked.connect(self._save_app_preset)
+        self.app_preset_actions = PresetActionBar()
+        self.app_preset_actions.view_requested.connect(self._view_app_preset_values)
+        self.app_preset_actions.save_requested.connect(self._save_app_preset_clicked)
+        self.app_preset_actions.save_as_requested.connect(self._save_app_preset_as)
+        self.app_preset_actions.restore_requested.connect(self._restore_app_preset)
+        self.app_preset_actions.delete_requested.connect(self._delete_app_preset)
+        # Compatibilidad con los nombres que ya usaban tests y callbacks.
+        self.app_preset_view_btn = self.app_preset_actions.view_btn
+        self.app_preset_save_btn = self.app_preset_actions.save_btn
+        self.app_preset_save_as_btn = self.app_preset_actions.save_as_btn
+        self.app_preset_restore_btn = self.app_preset_actions.restore_btn
+        self.app_preset_delete_btn = self.app_preset_actions.delete_btn
 
-        self.app_preset_save_as_btn = _make_icon_tool_button(
-            name="Guardar como…",
-            icon_kind="save_as",
-        )
-        self.app_preset_save_as_btn.clicked.connect(self._save_app_preset_as)
-
-        self.app_preset_delete_btn = _make_icon_tool_button(
-            name="Borrar",
-            icon_kind="delete",
-        )
-        self.app_preset_delete_btn.clicked.connect(self._delete_app_preset)
-
-        controls = _combo_actions_row(
-            self.app_preset,
-            self.app_preset_save_btn,
-            self.app_preset_save_as_btn,
-            self.app_preset_delete_btn,
-        )
+        controls = _combo_actions_row(self.app_preset, self.app_preset_actions)
         self.brand_logo = _brand_logo_label(bar)
         bar.body.addRow(
             _field_label("Activo"),
@@ -1069,10 +1039,42 @@ class SettingsDialog(QtWidgets.QDialog):
 
         if self._controller is None:
             self.app_preset.setEnabled(False)
-            self.app_preset_save_btn.setEnabled(False)
-            self.app_preset_save_as_btn.setEnabled(False)
-            self.app_preset_delete_btn.setEnabled(False)
+            self.app_preset_actions.setEnabled(False)
         return bar
+
+    def _app_preset_live(self) -> dict[str, Any]:
+        """Estado vivo que se compara con el preset general.
+
+        Se lee de los widgets (no de `result_config`, que escribe perfiles y se
+        llama en un timer). La geometría y los espejos quedan fuera a propósito.
+        """
+        audio = self.audio.currentData()
+        if audio is None:
+            audio = self.audio.currentText()
+        return {
+            **self._config,
+            "language": str(self.language.currentData() or "en"),
+            "model": self.model.currentText(),
+            "compute_type": str(self.compute_type.currentData() or "float16"),
+            "audio_monitor": str(audio or ""),
+            "latency_mode": self._current_mode(),
+            "translation_decode_preset": self._current_tx_preset(),
+            "translator_model": str(
+                self.translator_model.currentData() or DEFAULT_TRANSLATOR_MODEL
+            ),
+            "translation_sticky_mode": str(self.tx_sticky_mode.currentData() or "off"),
+            "second_line_mode": str(self.second_line_mode.currentData() or "none"),
+            "captions_show_partials": self.captions_show_partials.isChecked(),
+            "captions_allow_rewrite": self.captions_allow_rewrite.isChecked(),
+            "font_size": int(self.font_size.value()),
+            "font_family": self._current_font_family(),
+            "font_weight": self._current_font_weight(),
+            "font_color": self._swatch_hex(self.font_color_btn),
+            "bg_color": self._swatch_hex(self.bg_color_btn),
+            "bg_alpha": self.alpha.value() / 100.0,
+            "padding": int(self.padding.value()),
+            "text_align": self._current_text_align(),
+        }
 
     def _refresh_app_preset_bar(self) -> None:
         self._loading_app_preset = True
@@ -1087,24 +1089,30 @@ class SettingsDialog(QtWidgets.QDialog):
                 self.app_preset.setCurrentIndex(idx if idx >= 0 else 0)
             else:
                 self.app_preset.setCurrentIndex(0)
-            has_active = bool(current) and current in (
-                self._config.get("app_presets") or {}
-            )
-            can_edit = self._controller is not None
-            factory = is_factory_preset(current if isinstance(current, str) else None)
-            can_delete = can_edit and has_active and not factory
-            self.app_preset_save_btn.setEnabled(can_edit and has_active)
-            self.app_preset_delete_btn.setEnabled(can_delete)
-            if factory:
-                self.app_preset_delete_btn.setToolTip(
-                    "Los presets de fábrica no se pueden borrar"
-                )
-            else:
-                self.app_preset_delete_btn.setToolTip("Borrar")
-            self.app_preset_save_as_btn.setEnabled(can_edit)
-            self.app_preset.setEnabled(can_edit)
+            self.app_preset.setEnabled(self._controller is not None)
+            self._sync_app_preset_actions()
         finally:
             self._loading_app_preset = False
+
+    def _sync_app_preset_actions(self) -> None:
+        current = self._config.get("app_preset")
+        preset_id = current if isinstance(current, str) and current else None
+        active = bool(preset_id) and preset_id in (
+            self._config.get("app_presets") or {}
+        )
+        modified = False
+        if active and preset_id:
+            modified = is_modified(
+                DOMAIN_APP, self._config, preset_id, self._app_preset_live()
+            )
+        state = ActionState(
+            active=active,
+            modified=modified,
+            deletable=active and is_deletable(DOMAIN_APP, preset_id),
+            factory=bool(preset_id) and is_factory(DOMAIN_APP, preset_id),
+        )
+        self.app_preset_actions.configure(state)
+        self.app_preset_actions.setEnabled(self._controller is not None)
 
     def _on_app_preset_changed(self, _index: int = 0) -> None:
         if self._loading_app_preset or self._controller is None:
@@ -1114,22 +1122,65 @@ class SettingsDialog(QtWidgets.QDialog):
         if warning:
             QtWidgets.QMessageBox.information(self, "Preset", warning)
 
-    def _save_app_preset(self) -> None:
+    def _view_app_preset_values(self) -> None:
+        preset_id = self._config.get("app_preset")
+        if not preset_id:
+            return
+        rows = describe(DOMAIN_APP, self._config, str(preset_id))
+        note = None
+        if is_partial(DOMAIN_APP, self._config, str(preset_id)):
+            note = (
+                "Este preset fija solo estas opciones; el resto de la "
+                "configuración se conserva como esté."
+            )
+        elif is_factory(DOMAIN_APP, str(preset_id)):
+            note = "Preset de fábrica: sus valores no se pueden modificar."
+        PresetValuesDialog(
+            self,
+            title=f"Valores de «{preset_label(DOMAIN_APP, str(preset_id))}»",
+            subtitle="Opciones que aplica este preset al elegirlo.",
+            rows=rows,
+            note=note,
+        ).exec()
+
+    def _save_app_preset_clicked(self) -> None:
+        """Guardar: sobrescribir el propio o crear uno nuevo, nunca tocar fábrica."""
         if self._controller is None:
             return
+        preset_id = self._config.get("app_preset")
+        if not preset_id:
+            self._save_app_preset_as()
+            return
+        factory = is_factory(DOMAIN_APP, str(preset_id))
+        choice = ask_save_choice(
+            self,
+            preset_label=preset_label(DOMAIN_APP, str(preset_id)),
+            is_factory=factory,
+        )
+        if choice == CHOICE_NEW:
+            self._save_app_preset_as()
+            return
+        if choice != CHOICE_OVERWRITE or factory:
+            return
         self._controller.save_app_preset_from_settings(self)
+        self._sync_app_preset_actions()
 
     def _save_app_preset_as(self) -> None:
         if self._controller is None:
             return
-        name, ok = QtWidgets.QInputDialog.getText(
-            self,
-            "Guardar preset general",
-            "Nombre del preset:",
-        )
-        if not ok:
+        name = ask_preset_name(self, title="Guardar preset general")
+        if name is None:
             return
-        self._controller.save_app_preset_as_from_settings(str(name), self)
+        self._controller.save_app_preset_as_from_settings(name, self)
+
+    def _restore_app_preset(self) -> None:
+        """Vuelve a los valores del preset activo (no a los de fábrica globales)."""
+        if self._controller is None:
+            return
+        preset_id = self._config.get("app_preset")
+        if not preset_id:
+            return
+        self._controller.apply_app_preset_from_settings(str(preset_id), self)
 
     def _delete_app_preset(self) -> None:
         if self._controller is None:
@@ -1148,7 +1199,9 @@ class SettingsDialog(QtWidgets.QDialog):
         box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
         box.setWindowTitle("Borrar preset")
         box.setText(f"¿Borrar el preset «{preset_id}»?")
-        box.setInformativeText("No se puede deshacer. La configuración actual no cambia.")
+        box.setInformativeText(
+            "No se puede deshacer. La configuración actual no cambia."
+        )
         box.setStandardButtons(
             QtWidgets.QMessageBox.StandardButton.Yes
             | QtWidgets.QMessageBox.StandardButton.No
@@ -1178,15 +1231,10 @@ class SettingsDialog(QtWidgets.QDialog):
                 if pos >= 0:
                     self.audio.setCurrentIndex(pos)
                 else:
-                    self.audio.insertItem(
-                        0, describe_audio_source(audio).label, audio
-                    )
+                    self.audio.insertItem(0, describe_audio_source(audio).label, audio)
                     self.audio.setCurrentIndex(0)
 
-            mode = str(self._config.get("latency_mode", "stable"))
-            mode_idx = self.latency_mode.findData(mode)
-            self.latency_mode.setCurrentIndex(mode_idx if mode_idx >= 0 else 0)
-            self._load_profile_into_sliders(mode)
+            self._refresh_latency_preset_combo()
 
             self.captions_show_partials.setChecked(
                 bool(self._config.get("captions_show_partials", False))
@@ -1226,13 +1274,12 @@ class SettingsDialog(QtWidgets.QDialog):
             self._refresh_translator_model_combo()
 
             self._refresh_translation_preset_combo()
-            self._load_translation_decode_into_spins()
-            self._sync_translation_preset_actions()
             self.apply_saved_geometry()
             self._refresh_preview()
         finally:
             self._guarding_mode_conflict = False
         self._refresh_app_preset_bar()
+        self._sync_all_preset_actions()
 
     def apply_saved_geometry(
         self, *, fallback_center: QtCore.QPoint | None = None
@@ -1264,7 +1311,138 @@ class SettingsDialog(QtWidgets.QDialog):
     def accept(self) -> None:
         if not self._ensure_modes_compatible(changed="save"):
             return
+        if not self._confirm_preset_drafts():
+            return
         super().accept()
+
+    def _confirm_preset_drafts(self) -> bool:
+        """Cierra el ciclo de presets al aceptar el diálogo.
+
+        Un preset propio absorbe el borrador (equivale a guardar los ajustes).
+        Un preset de fábrica no se puede escribir: se ofrece guardarlo como uno
+        nuevo, descartar las opciones que fija o cancelar.
+        """
+        factory_domains: list[str] = []
+        if is_factory(DOMAIN_LATENCY, self._current_mode()) and is_modified(
+            DOMAIN_LATENCY, self._config, self._current_mode(), self._latency_live()
+        ):
+            factory_domains.append(DOMAIN_LATENCY)
+        if is_factory(DOMAIN_DECODE, self._current_tx_preset()) and is_modified(
+            DOMAIN_DECODE, self._config, self._current_tx_preset(), self._tx_live()
+        ):
+            factory_domains.append(DOMAIN_DECODE)
+        app_preset = self._config.get("app_preset")
+        app_modified = bool(app_preset) and is_modified(
+            DOMAIN_APP, self._config, str(app_preset), self._app_preset_live()
+        )
+        if app_modified and is_factory(DOMAIN_APP, str(app_preset)):
+            factory_domains.append(DOMAIN_APP)
+
+        if factory_domains:
+            labels = ", ".join(
+                preset_label(domain, self._active_preset_id(domain))
+                for domain in factory_domains
+            )
+            box = QtWidgets.QMessageBox(self)
+            box.setObjectName("SettingsDialog")
+            box.setStyleSheet(_SETTINGS_QSS)
+            box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+            box.setWindowTitle("Preset de fábrica modificado")
+            box.setText(f"Has modificado el preset de fábrica «{labels}».")
+            box.setInformativeText(
+                "Los presets de fábrica no se pueden modificar. ¿Qué hago con "
+                "los cambios?"
+            )
+            save_btn = box.addButton(
+                "Guardar como nuevo…",
+                QtWidgets.QMessageBox.ButtonRole.AcceptRole,
+            )
+            discard_btn = box.addButton(
+                "Descartar cambios", QtWidgets.QMessageBox.ButtonRole.DestructiveRole
+            )
+            box.addButton("Cancelar", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(save_btn)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is save_btn:
+                if not self._save_factory_changes_as(factory_domains):
+                    return False
+            elif clicked is discard_btn:
+                self._discard_factory_changes(factory_domains)
+            else:
+                return False
+
+        self._commit_latency_draft()
+        self._commit_translation_draft()
+        return True
+
+    def _active_preset_id(self, domain: str) -> str | None:
+        if domain == DOMAIN_APP:
+            value = self._config.get("app_preset")
+            return str(value) if value else None
+        if domain == DOMAIN_LATENCY:
+            return self._current_mode()
+        return self._current_tx_preset()
+
+    def _save_factory_changes_as(self, domains: list[str]) -> bool:
+        """Crea un preset nuevo por dominio con los valores que hay en pantalla."""
+        titles = {
+            DOMAIN_APP: "Guardar preset general",
+            DOMAIN_LATENCY: "Guardar preset de latencia",
+            DOMAIN_DECODE: "Guardar preset de decoding",
+        }
+        base_name: str | None = None
+        saved_any = False
+        for domain in domains:
+            suffix = "" if len(domains) == 1 else f" ({self._active_preset_id(domain)})"
+            name = ask_preset_name(
+                self,
+                title=titles[domain] + suffix,
+            )
+            if name is None:
+                if not saved_any:
+                    return False
+                continue
+            if domain != DOMAIN_APP and base_name is not None:
+                # Un nombre para los tres: los presets parciales se llaman igual
+                # en sus respectivos catálogos, sin colisionar entre sí.
+                name = base_name
+            elif base_name is None:
+                base_name = name
+            try:
+                if domain == DOMAIN_APP:
+                    if self._controller is None:
+                        return False
+                    self._controller.save_app_preset_as_from_settings(name, self)
+                elif domain == DOMAIN_LATENCY:
+                    self._config = save_latency_preset_as(
+                        self._config, name, self._latency_live()
+                    )
+                else:
+                    self._config = add_translation_user_preset(
+                        self._config, name, self._spins_decode()
+                    )
+            except ValueError as exc:
+                QtWidgets.QMessageBox.warning(self, "Preset", str(exc))
+                return False
+            saved_any = True
+        self._refresh_latency_preset_combo()
+        self._refresh_translation_preset_combo()
+        self._refresh_app_preset_bar()
+        return True
+
+    def _discard_factory_changes(self, domains: list[str]) -> None:
+        for domain in domains:
+            if domain == DOMAIN_APP:
+                if self._controller is not None:
+                    preset_id = self._active_preset_id(DOMAIN_APP)
+                    if preset_id:
+                        self._controller.apply_app_preset_from_settings(preset_id, self)
+            elif domain == DOMAIN_LATENCY:
+                self._load_latency_preset_into_sliders(self._current_mode())
+            else:
+                self._load_translation_decode_into_spins()
+        self._sync_all_preset_actions()
 
     def _on_show_partials_toggled(self, checked: bool) -> None:
         if self._guarding_mode_conflict:
@@ -1439,22 +1617,18 @@ class SettingsDialog(QtWidgets.QDialog):
         body, body_layout = self._new_tab_body()
 
         latency = _Section("Latencia")
-        self.latency_mode = QtWidgets.QComboBox()
-        self.latency_mode.addItem("Estable — más preciso", "stable")
-        self.latency_mode.addItem("Baja latencia — más rápido", "low")
-        mode = str(config.get("latency_mode", "stable"))
-        mode_idx = self.latency_mode.findData(mode)
-        self.latency_mode.setCurrentIndex(mode_idx if mode_idx >= 0 else 0)
-        self.latency_mode.currentIndexChanged.connect(self._on_mode_changed)
-        _size_combo(self.latency_mode, "md")
-        self.reset_btn = _make_icon_tool_button(
-            name="Restablecer valores del modo",
-            icon_kind="reset",
-        )
-        self.reset_btn.clicked.connect(self._reset_mode)
+        self.latency_preset = QtWidgets.QComboBox()
+        _size_combo(self.latency_preset, "lg")
+        self.latency_preset.currentIndexChanged.connect(self._on_latency_preset_changed)
+        self.latency_actions = PresetActionBar()
+        self.latency_actions.view_requested.connect(self._view_latency_values)
+        self.latency_actions.save_requested.connect(self._save_latency_clicked)
+        self.latency_actions.save_as_requested.connect(self._save_latency_as)
+        self.latency_actions.restore_requested.connect(self._restore_latency_preset)
+        self.latency_actions.delete_requested.connect(self._delete_latency_preset)
         latency.add_row(
-            "Modo",
-            _combo_actions_row(self.latency_mode, self.reset_btn),
+            "Preset",
+            _combo_actions_row(self.latency_preset, self.latency_actions),
             HINT_LATENCY_MODE,
         )
 
@@ -1659,13 +1833,8 @@ class SettingsDialog(QtWidgets.QDialog):
 
         display = _Section("Visualización")
         self.second_line_mode = QtWidgets.QComboBox()
-        second_line_labels = {
-            "live_asr": "Reconocimiento en vivo",
-            "original": "Idioma original confirmado",
-            "none": "Nada",
-        }
         for mode_key in SECOND_LINE_MODES:
-            self.second_line_mode.addItem(second_line_labels[mode_key], mode_key)
+            self.second_line_mode.addItem(SECOND_LINE_LABELS[mode_key], mode_key)
         current_mode = str(config.get("second_line_mode", "live_asr"))
         idx = self.second_line_mode.findData(current_mode)
         self.second_line_mode.setCurrentIndex(idx if idx >= 0 else 0)
@@ -1687,32 +1856,21 @@ class SettingsDialog(QtWidgets.QDialog):
         self.tx_preset.currentIndexChanged.connect(self._on_tx_preset_changed)
         _size_combo(self.tx_preset, "lg")
 
-        self.tx_save_btn = _make_icon_tool_button(
-            name="Guardar",
-            icon_kind="save",
-        )
-        self.tx_save_btn.clicked.connect(self._save_translation_preset)
-
-        self.tx_save_as_btn = _make_icon_tool_button(
-            name="Guardar como…",
-            icon_kind="save_as",
-        )
-        self.tx_save_as_btn.clicked.connect(self._save_translation_preset_as)
-
-        self.tx_delete_btn = _make_icon_tool_button(
-            name="Borrar",
-            icon_kind="delete",
-        )
-        self.tx_delete_btn.clicked.connect(self._delete_translation_preset)
+        self.tx_actions = PresetActionBar()
+        self.tx_actions.view_requested.connect(self._view_translation_values)
+        self.tx_actions.save_requested.connect(self._save_translation_clicked)
+        self.tx_actions.save_as_requested.connect(self._save_translation_preset_as)
+        self.tx_actions.restore_requested.connect(self._restore_translation_preset)
+        self.tx_actions.delete_requested.connect(self._delete_translation_preset)
+        self.tx_view_btn = self.tx_actions.view_btn
+        self.tx_save_btn = self.tx_actions.save_btn
+        self.tx_save_as_btn = self.tx_actions.save_as_btn
+        self.tx_restore_btn = self.tx_actions.restore_btn
+        self.tx_delete_btn = self.tx_actions.delete_btn
 
         quality.add_row(
             "Preset",
-            _combo_actions_row(
-                self.tx_preset,
-                self.tx_save_btn,
-                self.tx_save_as_btn,
-                self.tx_delete_btn,
-            ),
+            _combo_actions_row(self.tx_preset, self.tx_actions),
         )
 
         # Rangos = clamps de config; length_penalty en décimas (0.6–1.5, paso 0.1).
@@ -1907,7 +2065,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.language.blockSignals(False)
 
     def _current_mode(self) -> str:
-        data = self.latency_mode.currentData()
+        data = self.latency_preset.currentData()
         return str(data) if data else "stable"
 
     def _profiles(self) -> dict[str, dict[str, float | int]]:
@@ -1919,48 +2077,184 @@ class SettingsDialog(QtWidgets.QDialog):
             self._config["latency_profiles"] = profiles
         return profiles
 
-    def _load_profile_into_sliders(self, mode: str) -> None:
+    def _saved_latency_profile(self, preset_id: str) -> dict[str, Any]:
+        profile = self._profiles().get(preset_id)
+        if isinstance(profile, dict):
+            return dict(profile)
+        return dict(LATENCY_FACTORY_PRESETS["stable"])
+
+    def _load_latency_preset_into_sliders(self, preset_id: str) -> None:
+        """Carga el preset en los sliders y reinicia el borrador."""
+        profile = self._saved_latency_profile(preset_id)
+        self._latency_draft = dict(profile)
         self._loading_profile = True
         try:
-            profile = effective_latency_profile({**self._config, "latency_mode": mode})
-            self.confidence.setValue(int(profile["agreement_n"]))
-            self.confidence_value.setText(str(int(profile["agreement_n"])))
-            tenths = int(round(float(profile["max_latency_sec"]) * 10))
+            self.confidence.setValue(int(profile.get("agreement_n", 2)))
+            self.confidence_value.setText(str(int(profile.get("agreement_n", 2))))
+            tenths = int(round(float(profile.get("max_latency_sec", 0.8)) * 10))
             self.max_latency.setValue(tenths)
             self.max_latency_value.setText(f"{tenths / 10:.1f}")
         finally:
             self._loading_profile = False
 
-    def _write_sliders_to_profile(self) -> None:
+    def _sync_latency_draft(self) -> None:
+        """Sliders → borrador. Solo toca lo que la UI deja editar."""
         if self._loading_profile:
             return
-        mode = self._current_mode()
-        profiles = self._profiles()
-        current = dict(profiles.get(mode) or LATENCY_FACTORY_PRESETS.get(mode, {}))
-        current["agreement_n"] = int(self.confidence.value())
-        current["max_latency_sec"] = self.max_latency.value() / 10.0
-        if "min_chunk_seconds" not in current:
-            current["min_chunk_seconds"] = LATENCY_FACTORY_PRESETS[mode][
-                "min_chunk_seconds"
-            ]
-        profiles[mode] = current
-        self._config["latency_profiles"] = profiles
+        draft = dict(self._latency_draft or {})
+        draft["agreement_n"] = int(self.confidence.value())
+        draft["max_latency_sec"] = self.max_latency.value() / 10.0
+        draft.setdefault(
+            "min_chunk_seconds",
+            float(LATENCY_FACTORY_PRESETS["stable"]["min_chunk_seconds"]),
+        )
+        draft.setdefault(
+            "beam_size", int(LATENCY_FACTORY_PRESETS["stable"]["beam_size"])
+        )
+        self._latency_draft = draft
 
-    def _on_mode_changed(self) -> None:
-        self._load_profile_into_sliders(self._current_mode())
+    def _latency_live(self) -> dict[str, Any]:
+        self._sync_latency_draft()
+        return dict(self._latency_draft or {})
+
+    def _sync_latency_actions(self) -> None:
+        preset_id = self._current_mode()
+        state = ActionState(
+            active=preset_id in self._profiles(),
+            modified=is_modified(
+                DOMAIN_LATENCY, self._config, preset_id, self._latency_live()
+            ),
+            deletable=is_deletable(DOMAIN_LATENCY, preset_id),
+            factory=is_factory(DOMAIN_LATENCY, preset_id),
+        )
+        self.latency_actions.configure(state)
+        self.latency_actions.setEnabled(True)
+
+    def _refresh_latency_preset_combo(self) -> None:
+        current = str(self._config.get("latency_mode", "stable"))
+        self.latency_preset.blockSignals(True)
+        try:
+            self.latency_preset.clear()
+            for preset_id in domain_preset_ids(DOMAIN_LATENCY, self._config):
+                self.latency_preset.addItem(latency_preset_label(preset_id), preset_id)
+            idx = self.latency_preset.findData(current)
+            self.latency_preset.setCurrentIndex(idx if idx >= 0 else 0)
+        finally:
+            self.latency_preset.blockSignals(False)
+        self._config["latency_mode"] = self._current_mode()
+        self._load_latency_preset_into_sliders(self._current_mode())
+        self._sync_latency_actions()
+
+    def _on_latency_preset_changed(self) -> None:
+        if self._loading_profile:
+            return
+        preset_id = self._current_mode()
+        self._config["latency_mode"] = preset_id
+        self._load_latency_preset_into_sliders(preset_id)
+        self._sync_latency_actions()
 
     def _on_confidence_changed(self, value: int) -> None:
         self.confidence_value.setText(str(value))
-        self._write_sliders_to_profile()
+        self._sync_latency_draft()
+        self._sync_latency_actions()
 
     def _on_max_latency_changed(self, value: int) -> None:
         self.max_latency_value.setText(f"{value / 10:.1f}")
-        self._write_sliders_to_profile()
+        self._sync_latency_draft()
+        self._sync_latency_actions()
 
-    def _reset_mode(self) -> None:
-        mode = self._current_mode()
-        self._config = reset_latency_profile(self._config, mode)
-        self._load_profile_into_sliders(mode)
+    def _view_latency_values(self) -> None:
+        preset_id = self._current_mode()
+        rows = describe(DOMAIN_LATENCY, self._config, preset_id)
+        note = None
+        if is_factory(DOMAIN_LATENCY, preset_id):
+            note = "Preset de fábrica: sus valores no se pueden modificar."
+        PresetValuesDialog(
+            self,
+            title=f"Valores de «{preset_label(DOMAIN_LATENCY, preset_id)}»",
+            subtitle="Opciones que aplica este preset de latencia.",
+            rows=rows,
+            note=note,
+        ).exec()
+
+    def _save_latency_clicked(self) -> None:
+        preset_id = self._current_mode()
+        factory = is_factory(DOMAIN_LATENCY, preset_id)
+        choice = ask_save_choice(
+            self,
+            preset_label=preset_label(DOMAIN_LATENCY, preset_id),
+            is_factory=factory,
+        )
+        if choice == CHOICE_NEW:
+            self._save_latency_as()
+            return
+        if choice != CHOICE_OVERWRITE or factory:
+            return
+        try:
+            self._config = save_latency_preset(
+                self._config, preset_id, self._latency_live()
+            )
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Preset", str(exc))
+            return
+        self._refresh_latency_preset_combo()
+        self._persist_preset_library()
+
+    def _save_latency_as(self) -> None:
+        name = ask_preset_name(self, title="Guardar preset de latencia")
+        if name is None:
+            return
+        try:
+            self._config = save_latency_preset_as(
+                self._config, name, self._latency_live()
+            )
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Preset", str(exc))
+            return
+        self._refresh_latency_preset_combo()
+        self._persist_preset_library()
+
+    def _restore_latency_preset(self) -> None:
+        preset_id = self._current_mode()
+        self._load_latency_preset_into_sliders(preset_id)
+        self._sync_latency_actions()
+
+    def _delete_latency_preset(self) -> None:
+        preset_id = self._current_mode()
+        if not is_deletable(DOMAIN_LATENCY, preset_id):
+            return
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Borrar preset",
+            f"¿Borrar el preset «{preset_id}»?",
+        )
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._config = delete_latency_user_preset(self._config, preset_id)
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Preset", str(exc))
+            return
+        self._refresh_latency_preset_combo()
+        self._persist_preset_library()
+
+    def _commit_latency_draft(self) -> None:
+        """Persiste el borrador si el preset es propio; fábrica nunca se toca."""
+        preset_id = self._current_mode()
+        if is_factory(DOMAIN_LATENCY, preset_id):
+            self._config["latency_mode"] = preset_id
+            return
+        if not is_modified(
+            DOMAIN_LATENCY, self._config, preset_id, self._latency_live()
+        ):
+            self._config["latency_mode"] = preset_id
+            return
+        try:
+            self._config = save_latency_preset(
+                self._config, preset_id, self._latency_live()
+            )
+        except ValueError:
+            self._config["latency_mode"] = preset_id
 
     def _current_tx_preset(self) -> str:
         data = self.tx_preset.currentData()
@@ -1997,39 +2291,51 @@ class SettingsDialog(QtWidgets.QDialog):
     def _refresh_translation_preset_combo(self) -> None:
         current = str(self._config.get("translation_decode_preset", "balanced"))
         self.tx_preset.blockSignals(True)
-        self.tx_preset.clear()
-        for preset_id in ("fast", "balanced", "quality", "custom"):
-            label = TRANSLATION_PRESET_LABELS.get(preset_id, preset_id)
-            self.tx_preset.addItem(label, preset_id)
-        for preset_id in translation_user_preset_ids(self._config):
-            self.tx_preset.addItem(preset_id, preset_id)
-        idx = self.tx_preset.findData(current)
-        self.tx_preset.setCurrentIndex(
-            idx if idx >= 0 else self.tx_preset.findData("balanced")
-        )
-        self.tx_preset.blockSignals(False)
+        try:
+            self.tx_preset.clear()
+            for preset_id in domain_preset_ids(DOMAIN_DECODE, self._config):
+                self.tx_preset.addItem(
+                    TRANSLATION_PRESET_LABELS.get(preset_id, preset_id), preset_id
+                )
+            idx = self.tx_preset.findData(current)
+            self.tx_preset.setCurrentIndex(
+                idx if idx >= 0 else self.tx_preset.findData("balanced")
+            )
+        finally:
+            self.tx_preset.blockSignals(False)
+        self._config["translation_decode_preset"] = self._current_tx_preset()
+        self._load_translation_decode_into_spins()
+        self._sync_translation_preset_actions()
 
     def _load_translation_decode_into_spins(self) -> None:
+        """Carga el preset en los sliders y reinicia el borrador."""
+        preset = self._current_tx_preset()
+        saved = self._translation_profiles().get(preset)
+        decode = (
+            dict(saved)
+            if isinstance(saved, dict)
+            else dict(TRANSLATION_FACTORY_PRESETS.get(preset, {}))
+        )
+        if not decode:
+            decode = dict(TRANSLATION_FACTORY_PRESETS["balanced"])
+        self._tx_draft = {
+            "beam_size": int(decode.get("beam_size", 4)),
+            "length_penalty": float(decode.get("length_penalty", 0.7)),
+            "no_repeat_ngram_size": int(decode.get("no_repeat_ngram_size", 3)),
+        }
         self._loading_tx = True
         try:
-            decode = effective_translation_decode(
-                {
-                    **self._config,
-                    "translation_decode_preset": self._current_tx_preset(),
-                }
+            self.tx_beam.setValue(int(self._tx_draft["beam_size"]))
+            self.tx_length.setValue(
+                int(round(float(self._tx_draft["length_penalty"]) * 10))
             )
-            self.tx_beam.setValue(int(decode["beam_size"]))
-            self.tx_length.setValue(int(round(float(decode["length_penalty"]) * 10)))
-            self.tx_ngram.setValue(int(decode["no_repeat_ngram_size"]))
+            self.tx_ngram.setValue(int(self._tx_draft["no_repeat_ngram_size"]))
             self._sync_tx_decode_chips()
         finally:
             self._loading_tx = False
 
-    def _write_spins_to_custom_profile(self) -> None:
-        profiles = self._translation_profiles()
-        profiles["custom"] = self._spins_decode()
-        self._config["translation_profiles"] = profiles
-        self._config["translation_decode_preset"] = "custom"
+    def _tx_live(self) -> dict[str, float | int]:
+        return dict(self._tx_draft)
 
     def _on_tx_preset_changed(self) -> None:
         preset = self._current_tx_preset()
@@ -2042,76 +2348,97 @@ class SettingsDialog(QtWidgets.QDialog):
         self._on_tx_decode_edited()
 
     def _on_tx_decode_edited(self, *_args: Any) -> None:
+        """Editar los sliders ya no salta a `custom`: marca el preset modificado."""
         if self._loading_tx:
             return
-        self._write_spins_to_custom_profile()
-        if self._current_tx_preset() != "custom":
-            self.tx_preset.blockSignals(True)
-            idx = self.tx_preset.findData("custom")
-            if idx >= 0:
-                self.tx_preset.setCurrentIndex(idx)
-            self.tx_preset.blockSignals(False)
+        self._tx_draft = self._spins_decode()
         self._sync_translation_preset_actions()
 
     def _sync_translation_preset_actions(self) -> None:
         preset = self._current_tx_preset()
-        is_user = preset not in TRANSLATION_RESERVED_PRESET_IDS
-        self.tx_save_btn.setEnabled(is_user)
-        self.tx_delete_btn.setEnabled(is_user)
-        self.tx_save_as_btn.setEnabled(True)
+        state = ActionState(
+            active=preset in self._translation_profiles(),
+            modified=is_modified(DOMAIN_DECODE, self._config, preset, self._tx_live()),
+            deletable=is_deletable(DOMAIN_DECODE, preset),
+            factory=is_factory(DOMAIN_DECODE, preset),
+        )
+        self.tx_actions.configure(state)
 
-    def _save_translation_preset(self) -> None:
+    def _view_translation_values(self) -> None:
         preset = self._current_tx_preset()
-        if preset in TRANSLATION_RESERVED_PRESET_IDS:
+        rows = describe(DOMAIN_DECODE, self._config, preset)
+        note = None
+        if is_factory(DOMAIN_DECODE, preset):
+            note = "Preset de fábrica: sus valores no se pueden modificar."
+        PresetValuesDialog(
+            self,
+            title=f"Valores de «{preset_label(DOMAIN_DECODE, preset)}»",
+            subtitle="Opciones de decoding que aplica este preset.",
+            rows=rows,
+            note=note,
+        ).exec()
+
+    def _save_translation_clicked(self) -> None:
+        preset = self._current_tx_preset()
+        factory = is_factory(DOMAIN_DECODE, preset)
+        choice = ask_save_choice(
+            self,
+            preset_label=preset_label(DOMAIN_DECODE, preset),
+            is_factory=factory,
+        )
+        if choice == CHOICE_NEW:
+            self._save_translation_preset_as()
+            return
+        if choice != CHOICE_OVERWRITE or factory:
             return
         try:
-            self._config = add_translation_user_preset(
-                self._config,
-                preset,
-                self._spins_decode(),
+            self._config = save_translation_preset(
+                self._config, preset, self._spins_decode()
             )
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "Preset", str(exc))
             return
         self._refresh_translation_preset_combo()
+        self._persist_preset_library()
+
+    def _restore_translation_preset(self) -> None:
         self._load_translation_decode_into_spins()
         self._sync_translation_preset_actions()
+
+    def _commit_translation_draft(self) -> None:
+        """Persiste el borrador si el preset es propio; fábrica nunca se toca."""
+        preset = self._current_tx_preset()
+        self._config["translation_decode_preset"] = preset
+        if is_factory(DOMAIN_DECODE, preset):
+            return
+        if not is_modified(DOMAIN_DECODE, self._config, preset, self._tx_live()):
+            return
+        try:
+            self._config = save_translation_preset(
+                self._config, preset, self._spins_decode()
+            )
+        except ValueError:
+            pass
 
     def _save_translation_preset_as(self) -> None:
-        name, ok = QtWidgets.QInputDialog.getText(
-            self,
-            "Guardar preset",
-            "Nombre del preset:",
-        )
-        if not ok:
-            return
-        slug = slugify_translation_preset_name(name)
-        if not slug:
-            QtWidgets.QMessageBox.warning(self, "Preset", "Nombre vacío o inválido.")
-            return
-        if slug in TRANSLATION_RESERVED_PRESET_IDS:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Preset",
-                f"«{slug}» está reservado. Elige otro nombre.",
-            )
+        name = ask_preset_name(self, title="Guardar preset de decoding")
+        if name is None:
             return
         try:
             self._config = add_translation_user_preset(
                 self._config,
-                slug,
+                name,
                 self._spins_decode(),
             )
         except ValueError as exc:
             QtWidgets.QMessageBox.warning(self, "Preset", str(exc))
             return
         self._refresh_translation_preset_combo()
-        self._load_translation_decode_into_spins()
-        self._sync_translation_preset_actions()
+        self._persist_preset_library()
 
     def _delete_translation_preset(self) -> None:
         preset = self._current_tx_preset()
-        if preset in TRANSLATION_RESERVED_PRESET_IDS:
+        if not is_deletable(DOMAIN_DECODE, preset):
             return
         answer = QtWidgets.QMessageBox.question(
             self,
@@ -2126,17 +2453,14 @@ class SettingsDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "Preset", str(exc))
             return
         self._refresh_translation_preset_combo()
-        self._load_translation_decode_into_spins()
-        self._sync_translation_preset_actions()
+        self._persist_preset_library()
 
     def _pick_color(
         self,
         button: QtWidgets.QPushButton,
         hex_label: QtWidgets.QLabel,
     ) -> None:
-        dialog = QtWidgets.QColorDialog(
-            QtGui.QColor(self._swatch_hex(button)), self
-        )
+        dialog = QtWidgets.QColorDialog(QtGui.QColor(self._swatch_hex(button)), self)
         dialog.setOption(
             QtWidgets.QColorDialog.ColorDialogOption.DontUseNativeDialog, True
         )
@@ -2155,12 +2479,8 @@ class SettingsDialog(QtWidgets.QDialog):
         self._pick_color(self.bg_color_btn, self.bg_color_hex)
 
     def result_config(self) -> dict[str, Any]:
-        self._write_sliders_to_profile()
         preset = self._current_tx_preset()
-        if preset == "custom":
-            self._write_spins_to_custom_profile()
-        else:
-            self._config["translation_decode_preset"] = preset
+        self._config["translation_decode_preset"] = preset
         lang = str(self.language.currentData() or "en").strip().lower() or "en"
         installed = list(AVAILABLE_LANGUAGES.keys())
         audio = self.audio.currentData()
@@ -2172,9 +2492,7 @@ class SettingsDialog(QtWidgets.QDialog):
                 "language": lang,
                 "installed_languages": installed,
                 "model": self.model.currentText(),
-                "compute_type": str(
-                    self.compute_type.currentData() or "float16"
-                ),
+                "compute_type": str(self.compute_type.currentData() or "float16"),
                 "audio_monitor": str(audio or ""),
                 "latency_mode": self._current_mode(),
                 "latency_profiles": deepcopy(self._profiles()),

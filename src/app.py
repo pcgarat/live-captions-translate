@@ -307,6 +307,19 @@ class AppController:
         self._save_config(self.config, trace_reason="app_preset_save")
         settings_dlg.reload_from_config(self.config)
 
+    def persist_preset_library_from_settings(
+        self, settings_dlg: SettingsDialog
+    ) -> None:
+        """Guarda altas/borrados de presets de latencia y decoding al momento.
+
+        El preset activo y sus valores aplicados siguen siendo cosa de Guardar;
+        esto solo hace que la biblioteca no dependa de que el diálogo se acepte.
+        """
+        cfg = settings_dlg.result_config()
+        for key in ("latency_profiles", "translation_profiles"):
+            self.config[key] = cfg[key]
+        self._save_config(self.config, trace_reason="preset_library")
+
     def save_app_preset_as_from_settings(
         self, name: str, settings_dlg: SettingsDialog
     ) -> None:

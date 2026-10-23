@@ -52,15 +52,32 @@ def test_upgrade_seeds_new_presets_and_keeps_user_ones() -> None:
         assert preset_id in upgraded["app_presets"]
 
 
-def test_user_edits_to_factory_preset_survive_revalidation() -> None:
-    """La siembra solo rellena huecos: «Guardar» sobre un preset de fábrica manda."""
+def test_user_edits_to_factory_preset_do_not_survive() -> None:
+    """La fábrica es inmutable: una copia editada en config se descarta al validar."""
     cfg = apply_app_preset(validate_config({}), "video-de-es")
-    edited = save_app_preset({**cfg, "font_size": 44, "model": "small"})
-    assert edited["app_presets"]["video-de-es"]["font_size"] == 44
+    tampered = {
+        **cfg,
+        "app_presets": {
+            **cfg["app_presets"],
+            "video-de-es": {**cfg["app_presets"]["video-de-es"], "font_size": 44},
+        },
+    }
+    reloaded = validate_config(tampered)
+    assert reloaded["app_presets"]["video-de-es"] != tampered["app_presets"][
+        "video-de-es"
+    ]
+    assert "font_size" not in reloaded["app_presets"]["video-de-es"]
 
-    reloaded = validate_config(edited)
-    assert reloaded["app_presets"]["video-de-es"]["font_size"] == 44
-    assert reloaded["app_presets"]["video-de-es"]["model"] == "small"
+    try:
+        save_app_preset({**cfg, "font_size": 44})
+        raise AssertionError("expected factory overwrite rejected")
+    except ValueError as exc:
+        assert "fábrica" in str(exc).lower()
+
+    # El camino correcto: guardar como nuevo conserva los valores vivos.
+    saved = save_app_preset_as(cfg, "mi-video-de", snapshot_src={**cfg, "font_size": 44})
+    assert saved["app_presets"]["mi-video-de"]["font_size"] == 44
+    assert saved["app_preset"] == "mi-video-de"
 
 
 def test_video_preset_applies_recommended_models() -> None:
@@ -105,17 +122,13 @@ def test_video_presets_preserve_user_latency_and_appearance() -> None:
             "window_pos": [120, 900],
             "window_width": 1400,
             "audio_monitor": "algun.monitor",
-            "latency_mode": "low",
+            "latency_mode": "mi-perfil",
             "latency_profiles": {
-                "stable": {
+                "mi-perfil": {
                     "agreement_n": 3,
                     "max_latency_sec": 1.2,
                     "min_chunk_seconds": 1.0,
-                },
-                "low": {
-                    "agreement_n": 1,
-                    "max_latency_sec": 0.9,
-                    "min_chunk_seconds": 0.5,
+                    "beam_size": 4,
                 },
             },
         }
@@ -128,8 +141,8 @@ def test_video_presets_preserve_user_latency_and_appearance() -> None:
     assert cfg["window_pos"] == [120, 900]
     assert cfg["window_width"] == 1400
     assert cfg["audio_monitor"] == "algun.monitor"
-    assert cfg["latency_mode"] == "low"
-    assert cfg["latency_profiles"]["stable"]["agreement_n"] == 3
+    assert cfg["latency_mode"] == "mi-perfil"
+    assert cfg["latency_profiles"]["mi-perfil"]["agreement_n"] == 3
 
 
 def test_video_preset_keeps_installed_languages_and_adds_its_own() -> None:

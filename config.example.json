@@ -11,12 +11,14 @@
     "stable": {
       "agreement_n": 1,
       "max_latency_sec": 0.4,
-      "min_chunk_seconds": 0.8
+      "min_chunk_seconds": 0.8,
+      "beam_size": 5
     },
     "low": {
       "agreement_n": 1,
       "max_latency_sec": 1.5,
-      "min_chunk_seconds": 0.35
+      "min_chunk_seconds": 0.35,
+      "beam_size": 1
     }
   },
   "installed_languages": [
