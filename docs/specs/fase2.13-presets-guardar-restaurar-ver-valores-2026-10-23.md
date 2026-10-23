@@ -18,7 +18,7 @@ latencia) con una regla única:
 | Preset de fábrica modificado | **Ver valores**, **Guardar como nuevo**, **Restaurar** |
 | Preset propio (usuario) sin cambios | **Ver valores**, **Borrar** |
 | Preset propio modificado | **Ver valores**, **Guardar**, **Restaurar**, **Borrar** |
-| Sin preset (`(ninguno)`) | ninguno |
+| Sin preset (`(ninguno)`) | **Guardar como nuevo** |
 
 **Usuario:** solo el autor. **Éxito:** no se puede sobrescribir un preset de
 fábrica; cualquier desviación es visible y reversible; cualquier preset se puede
@@ -142,7 +142,8 @@ del estado vivo.
 **Never:**
 - Escribir en un preset de fábrica.
 - Guardar como nuevo sobrescribiendo un id existente en silencio.
-- Mostrar botones de edición con `(ninguno)`.
+- Mostrar botones de edición (guardar, restaurar, borrar) con `(ninguno)`: lo
+  único que se ofrece es guardar el estado vivo como preset nuevo.
 - Añadir estos botones al chrome del overlay (decisión: solo Ajustes).
 
 ## Archivos
