@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import math
 import os
 import queue
 import subprocess
@@ -22,37 +23,26 @@ from src.ui.fonts import font_family_qss, font_weight_css
 _MAX_DISPLAY_CHARS = 4000
 # Viewport fijo: 3 líneas legibles con interlineado holgado.
 _CAPTION_VISIBLE_LINES = 3
-_CAPTION_LINE_GAP_PX = 12
-_CAPTION_BLOCK_SPACING = 10
-_CAPTION_LINE_HEIGHT = "1.45"
+_CAPTION_BLOCK_SPACING = 0
+# Debe coincidir con el line-height en px del rich text de los labels.
+_CAPTION_LINE_HEIGHT_FACTOR = 1.45
 _RESIZE_MARGIN = 8
 _MIN_WINDOW_WIDTH = 300
 _MAX_WINDOW_WIDTH = 2400
-_MIN_WINDOW_HEIGHT = 120
-_MAX_WINDOW_HEIGHT = 1600
+# Alto vertical: saltos de N líneas de caption (sin mínimo artificial en px).
+_MIN_CAPTION_LINES = 1
+_MAX_CAPTION_LINES = 24
 # Margen inferior en primer arranque / reclamp (no pegar al borde).
 _BOTTOM_MARGIN_PX = 48
 # Fila de controles (idioma, traducción, preset, ajustes, cerrar).
 _CHROME_CONTROLS_HEIGHT = 44
 # Evita parpadeo al cruzar widgets o al abrir un popup.
 _CHROME_HIDE_DELAY_MS = 400
-# Aparición/desaparición del hueco del chrome (captions no reflow).
+# Aparición/desaparición del chrome (overlay; captions y ventana fijos).
 _CHROME_ANIM_MS = 200
 
 # (left, right, top, bottom)
 ResizeEdge = tuple[bool, bool, bool, bool]
-
-
-class _ChromeSlot(QtWidgets.QWidget):
-    """Hueco animable: la sizeHint vertical sigue el alto fijado (puede ser 0)."""
-
-    def sizeHint(self) -> QtCore.QSize:
-        hint = super().sizeHint()
-        return QtCore.QSize(hint.width(), self.height())
-
-    def minimumSizeHint(self) -> QtCore.QSize:
-        hint = super().minimumSizeHint()
-        return QtCore.QSize(hint.width(), self.minimumHeight())
 
 
 class SubtitleOverlay(QtWidgets.QWidget):
@@ -102,8 +92,6 @@ class SubtitleOverlay(QtWidgets.QWidget):
         self._chrome_slot_px = 0
         self._chrome_target_visible = False
         self._chrome_pointer_inside = False
-        self._chrome_base_height = 0
-        self._chrome_anchor_bottom = 0
         self._chrome_anim = QtCore.QVariantAnimation(self)
         self._chrome_anim.setDuration(_CHROME_ANIM_MS)
         self._chrome_anim.setEasingCurve(QtCore.QEasingCurve.Type.InOutCubic)
@@ -157,19 +145,90 @@ class SubtitleOverlay(QtWidgets.QWidget):
             lambda pos: self._show_context_menu(self.panel.mapToParent(pos))
         )
         panel_layout = QtWidgets.QVBoxLayout(self.panel)
-        pad = int(self.config.get("padding", 24))
-        panel_layout.setContentsMargins(pad, pad // 2, pad, pad // 2)
-        # Sin spacing: el chrome colapsado a 0 no debe dejar un hueco fantasma de 6px.
+        pad = self._padding()
+        # Padding simétrico: alto ventana = 2*pad + chrome + N*línea.
+        panel_layout.setContentsMargins(pad, pad, pad, pad)
         panel_layout.setSpacing(0)
 
-        self.chrome_bar = _ChromeSlot()
-        self.chrome_bar.setObjectName("chromeBar")
-        self.chrome_bar.setMouseTracking(True)
-        self.chrome_bar.setFixedHeight(0)
-        self.chrome_bar.setSizePolicy(
+        # Reserva dinámica: altura = slot del chrome (0 oculto → captions usan el hueco).
+        self.chrome_spacer = QtWidgets.QWidget()
+        self.chrome_spacer.setObjectName("chromeSpacer")
+        self.chrome_spacer.setFixedHeight(0)
+        self.chrome_spacer.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Preferred,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
+        panel_layout.addWidget(self.chrome_spacer)
+
+        self.debug_hud_label = QtWidgets.QLabel("")
+        self.debug_hud_label.setObjectName("debugHud")
+        self.debug_hud_label.setWordWrap(False)
+        self.debug_hud_label.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.NoTextInteraction
+        )
+        self.debug_hud_label.setToolTip(
+            "ASR = último infer · q = cola captions→UI · "
+            "buf = audio en anillo · VRAM = GPU 0 (NVML)"
+        )
+        self.debug_hud_label.setVisible(False)
+        panel_layout.addWidget(self.debug_hud_label)
+
+        self.notice_label = QtWidgets.QLabel("")
+        self.notice_label.setObjectName("noticeLabel")
+        self.notice_label.setWordWrap(True)
+        self.notice_label.setVisible(False)
+
+        self._caption_scroll = QtWidgets.QScrollArea()
+        self._caption_scroll.setObjectName("captionScroll")
+        self._caption_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self._caption_scroll.setWidgetResizable(False)
+        self._caption_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._caption_scroll.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._caption_scroll.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignTop | QtCore.Qt.AlignmentFlag.AlignHCenter
+        )
+        self._caption_scroll.viewport().setAutoFillBackground(False)
+        self._caption_scroll.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+
+        self._caption_body = QtWidgets.QWidget()
+        self._caption_body.setObjectName("captionBody")
+        body_layout = QtWidgets.QVBoxLayout(self._caption_body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(_CAPTION_BLOCK_SPACING)
+
+        self.translated_label = QtWidgets.QLabel("")
+        self.translated_label.setWordWrap(True)
+        self.translated_label.setObjectName("translatedCaption")
+
+        self.final_label = QtWidgets.QLabel("")
+        self.final_label.setWordWrap(True)
+        self.final_label.setObjectName("finalCaption")
+
+        self.partial_label = QtWidgets.QLabel("")
+        self.partial_label.setWordWrap(True)
+        self.partial_label.setObjectName("partialCaption")
+        self._apply_text_align()
+
+        body_layout.addWidget(self.translated_label)
+        body_layout.addWidget(self.final_label)
+        body_layout.addWidget(self.partial_label)
+        self._caption_scroll.setWidget(self._caption_body)
+
+        panel_layout.addWidget(self.notice_label)
+        panel_layout.addWidget(self._caption_scroll)
+
+        # Overlay flotante: entra/sale por arriba sin mover ventana ni captions.
+        self.chrome_bar = QtWidgets.QWidget(self.panel)
+        self.chrome_bar.setObjectName("chromeBar")
+        self.chrome_bar.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.chrome_bar.setMouseTracking(True)
         top = QtWidgets.QHBoxLayout(self.chrome_bar)
         top.setContentsMargins(6, 4, 6, 4)
         top.setSpacing(6)
@@ -220,65 +279,8 @@ class SubtitleOverlay(QtWidgets.QWidget):
         self._chrome_opacity.setOpacity(0.0)
         self.chrome_bar.setGraphicsEffect(self._chrome_opacity)
         self.chrome_bar.hide()
-        panel_layout.addWidget(self.chrome_bar)
+        self._position_chrome_bar()
 
-        self.debug_hud_label = QtWidgets.QLabel("")
-        self.debug_hud_label.setObjectName("debugHud")
-        self.debug_hud_label.setWordWrap(False)
-        self.debug_hud_label.setTextInteractionFlags(
-            QtCore.Qt.TextInteractionFlag.NoTextInteraction
-        )
-        self.debug_hud_label.setToolTip(
-            "ASR = último infer · q = cola captions→UI · "
-            "buf = audio en anillo · VRAM = GPU 0 (NVML)"
-        )
-        self.debug_hud_label.setVisible(False)
-        panel_layout.addWidget(self.debug_hud_label)
-
-        self.notice_label = QtWidgets.QLabel("")
-        self.notice_label.setObjectName("noticeLabel")
-        self.notice_label.setWordWrap(True)
-        self.notice_label.setVisible(False)
-
-        self._caption_scroll = QtWidgets.QScrollArea()
-        self._caption_scroll.setObjectName("captionScroll")
-        self._caption_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        self._caption_scroll.setWidgetResizable(False)
-        self._caption_scroll.setHorizontalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        self._caption_scroll.setVerticalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        self._caption_scroll.setAlignment(QtCore.Qt.AlignmentFlag.AlignBottom)
-        self._caption_scroll.viewport().setAutoFillBackground(False)
-
-        self._caption_body = QtWidgets.QWidget()
-        self._caption_body.setObjectName("captionBody")
-        body_layout = QtWidgets.QVBoxLayout(self._caption_body)
-        body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(_CAPTION_BLOCK_SPACING)
-
-        self.translated_label = QtWidgets.QLabel("")
-        self.translated_label.setWordWrap(True)
-        self.translated_label.setObjectName("translatedCaption")
-
-        self.final_label = QtWidgets.QLabel("")
-        self.final_label.setWordWrap(True)
-        self.final_label.setObjectName("finalCaption")
-
-        self.partial_label = QtWidgets.QLabel("")
-        self.partial_label.setWordWrap(True)
-        self.partial_label.setObjectName("partialCaption")
-        self._apply_text_align()
-
-        body_layout.addWidget(self.translated_label)
-        body_layout.addWidget(self.final_label)
-        body_layout.addWidget(self.partial_label)
-        self._caption_scroll.setWidget(self._caption_body)
-
-        panel_layout.addWidget(self.notice_label)
-        panel_layout.addWidget(self._caption_scroll, stretch=1)
         root.addWidget(self.panel)
 
         for widget in (
@@ -311,9 +313,14 @@ class SubtitleOverlay(QtWidgets.QWidget):
         )
 
         width = self._clamp_window_width(int(self.config.get("window_width", 900)))
+        self.setMinimumSize(_MIN_WINDOW_WIDTH, self._min_window_height())
         self.resize(width, self._window_height())
         self._restore_geometry()
         self._apply_caption_geometry()
+        self._position_chrome_bar()
+
+    def minimumSizeHint(self) -> QtCore.QSize:
+        return QtCore.QSize(_MIN_WINDOW_WIDTH, self._min_window_height())
 
     def _saved_position(self) -> list[int] | None:
         pos = self.config.get("window_pos")
@@ -369,22 +376,18 @@ class SubtitleOverlay(QtWidgets.QWidget):
     def _restore_position(self) -> None:
         self._restore_geometry()
 
-    def _base_window_height(self) -> int:
-        """Altura persistida: sin el hueco temporal del chrome."""
-        return max(_MIN_WINDOW_HEIGHT, self.height() - self._chrome_slot_px)
-
     def _schedule_persist_geometry(self) -> None:
         if self._ignore_move_save or not self.isVisible():
             return
         self.config["window_pos"] = [self.x(), self.y()]
         self.config["window_width"] = self.width()
-        self.config["window_height"] = self._base_window_height()
+        self.config["window_height"] = self.height()
         self._save_pos_timer.start(250)
 
     def _persist_geometry(self) -> None:
         self.config["window_pos"] = [self.x(), self.y()]
         self.config["window_width"] = self.width()
-        self.config["window_height"] = self._base_window_height()
+        self.config["window_height"] = self.height()
         if self.on_save_config is not None:
             self.on_save_config(self.config)
 
@@ -394,15 +397,12 @@ class SubtitleOverlay(QtWidgets.QWidget):
         if self.isVisible():
             self.config["window_pos"] = [self.x(), self.y()]
             self.config["window_width"] = self.width()
-            self.config["window_height"] = self._base_window_height()
+            self.config["window_height"] = self.height()
         self._ignore_move_save = True
         try:
             self.setWindowFlags(self._window_flags())
             self._chrome_slot_px = 0
             self._chrome_target_visible = False
-            self._chrome_base_height = 0
-            self._chrome_anchor_bottom = 0
-            self.chrome_bar.setFixedHeight(0)
             self._chrome_opacity.setOpacity(0.0)
             self.chrome_bar.hide()
             self._restore_geometry()
@@ -485,7 +485,6 @@ class SubtitleOverlay(QtWidgets.QWidget):
         if self._chrome_target_visible:
             return
         self._chrome_target_visible = True
-        self._capture_chrome_anchor()
         self._animate_chrome_slot(_CHROME_CONTROLS_HEIGHT)
 
     def _schedule_hide_chrome(self) -> None:
@@ -506,15 +505,29 @@ class SubtitleOverlay(QtWidgets.QWidget):
         if not self._chrome_target_visible and self._chrome_slot_px == 0:
             return
         self._chrome_target_visible = False
-        self._capture_chrome_anchor()
         self._animate_chrome_slot(0)
 
-    def _capture_chrome_anchor(self) -> None:
-        """Ancla el borde inferior y la altura base (sin chrome) para la animación."""
-        self._chrome_base_height = max(
-            _MIN_WINDOW_HEIGHT, self.height() - self._chrome_slot_px
-        )
-        self._chrome_anchor_bottom = self.y() + self.height()
+    def _chrome_rest_rect(self) -> QtCore.QRect:
+        pad = self._padding()
+        left = pad
+        top = pad
+        width = max(self.panel.width() - 2 * pad, 80)
+        return QtCore.QRect(left, top, width, _CHROME_CONTROLS_HEIGHT)
+
+    def _sync_chrome_spacer(self) -> None:
+        """El spacer del layout sigue al slot animado: 0 ↔ CHROME."""
+        h = max(0, min(int(self._chrome_slot_px), _CHROME_CONTROLS_HEIGHT))
+        if self.chrome_spacer.height() != h:
+            self.chrome_spacer.setFixedHeight(h)
+
+    def _position_chrome_bar(self) -> None:
+        """Chrome absoluto sobre el spacer; altura visible = slot."""
+        rest = self._chrome_rest_rect()
+        h = max(0, min(self._chrome_slot_px, _CHROME_CONTROLS_HEIGHT))
+        self.chrome_bar.setGeometry(rest.x(), rest.y(), rest.width(), h)
+        t = h / _CHROME_CONTROLS_HEIGHT if _CHROME_CONTROLS_HEIGHT else 0.0
+        self._chrome_opacity.setOpacity(t)
+        self.chrome_bar.raise_()
 
     def _on_chrome_slot_value(self, value: object) -> None:
         new = int(round(float(value)))  # type: ignore[arg-type]
@@ -524,10 +537,10 @@ class SubtitleOverlay(QtWidgets.QWidget):
         self._chrome_slot_px = new
         if new > 0 and self.chrome_bar.isHidden():
             self.chrome_bar.show()
-        self.chrome_bar.setFixedHeight(new)
-        t = new / _CHROME_CONTROLS_HEIGHT if _CHROME_CONTROLS_HEIGHT else 0.0
-        self._chrome_opacity.setOpacity(t)
-        self._apply_chrome_window_geometry()
+        self._sync_chrome_spacer()
+        self._position_chrome_bar()
+        # Recalcula viewport: al ocultar chrome, los captions ocupan el hueco.
+        self._apply_caption_geometry()
         if new == 0:
             self.chrome_bar.hide()
 
@@ -535,46 +548,29 @@ class SubtitleOverlay(QtWidgets.QWidget):
         target = 0 if not self._chrome_target_visible else _CHROME_CONTROLS_HEIGHT
         if self._chrome_slot_px != target:
             self._chrome_slot_px = target
-            self.chrome_bar.setFixedHeight(target)
-            self._chrome_opacity.setOpacity(
-                1.0 if target else 0.0
-            )
-            if target == 0:
-                self.chrome_bar.hide()
-            elif self.chrome_bar.isHidden():
+        self._sync_chrome_spacer()
+        if target > 0:
+            if self.chrome_bar.isHidden():
                 self.chrome_bar.show()
-        self._apply_chrome_window_geometry()
+        else:
+            self.chrome_bar.hide()
+        self._position_chrome_bar()
+        self._apply_caption_geometry()
 
     def _animate_chrome_slot(self, target: int) -> None:
         target = max(0, min(int(target), _CHROME_CONTROLS_HEIGHT))
         if (
             self._chrome_anim.state() == QtCore.QAbstractAnimation.State.Running
-            and int(self._chrome_anim.endValue() or -1) == target
+            and int(float(self._chrome_anim.endValue() or -1)) == target
         ):
             return
         if target > 0:
             self.chrome_bar.show()
+            self.chrome_bar.raise_()
         self._chrome_anim.stop()
         self._chrome_anim.setStartValue(float(self._chrome_slot_px))
         self._chrome_anim.setEndValue(float(target))
         self._chrome_anim.start()
-
-    def _apply_chrome_window_geometry(self) -> None:
-        """Altura = base + slot; borde inferior fijo (no acumular deltas)."""
-        if self._chrome_base_height <= 0:
-            self._capture_chrome_anchor()
-        new_height = self._chrome_base_height + self._chrome_slot_px
-        new_top = self._chrome_anchor_bottom - new_height
-        self._ignore_move_save = True
-        try:
-            # move+resize es más fiable que setGeometry al encoger en X11/XWayland.
-            if self.height() != new_height:
-                self.resize(self.width(), new_height)
-            if self.y() != new_top or self.height() != new_height:
-                self.setGeometry(self.x(), new_top, self.width(), new_height)
-        finally:
-            self._ignore_move_save = False
-        self._apply_caption_geometry()
 
     def enterEvent(self, event: QtGui.QEnterEvent) -> None:
         self._chrome_pointer_inside = True
@@ -684,50 +680,105 @@ class SubtitleOverlay(QtWidgets.QWidget):
     def _apply_text_align(self) -> None:
         h = self._caption_h_align()
         self.notice_label.setAlignment(h)
-        bottom = h | QtCore.Qt.AlignmentFlag.AlignBottom
-        self.translated_label.setAlignment(bottom)
-        self.final_label.setAlignment(bottom)
-        self.partial_label.setAlignment(bottom)
+        # AlignTop: si hay menos líneas que el viewport, el hueco queda abajo
+        # (AlignBottom dejaba una línea fantasma vacía arriba).
+        top = h | QtCore.Qt.AlignmentFlag.AlignTop
+        self.translated_label.setAlignment(top)
+        self.final_label.setAlignment(top)
+        self.partial_label.setAlignment(top)
+
+    def _padding(self) -> int:
+        return max(0, int(self.config.get("padding", 24)))
+
+    def _caption_pixel_font(self) -> QtGui.QFont:
+        font = QtGui.QFont()
+        family = str(self.config.get("font_family") or "").strip()
+        if family:
+            font.setFamily(family)
+        font.setPixelSize(max(1, int(self.config.get("font_size", 28))))
+        font.setWeight(
+            QtGui.QFont.Weight(
+                font_weight_css(str(self.config.get("font_weight", "semibold")))
+            )
+        )
+        return font
 
     def _line_slot_height(self) -> int:
-        font_size = int(self.config.get("font_size", 28))
-        return font_size + _CAPTION_LINE_GAP_PX
+        """Alto de una línea = ceil(font_size × line-height), sin holguras raras."""
+        size = max(1, int(self.config.get("font_size", 28)))
+        return max(1, math.ceil(size * _CAPTION_LINE_HEIGHT_FACTOR))
 
-    def _chrome_height(self) -> int:
-        """Padding + hueco actual del chrome (animado) + notice."""
-        pad = int(self.config.get("padding", 24))
-        extra = pad + self._chrome_slot_px
+    def _hud_notice_overhead(self) -> int:
+        extra = 0
+        if not self.debug_hud_label.isHidden():
+            extra += max(self.debug_hud_label.sizeHint().height(), 16)
         if self.notice_label.isVisible():
             extra += max(self.notice_label.sizeHint().height(), 18)
         return extra
 
-    def _default_window_height(self) -> int:
-        return self._chrome_height() + max(
-            _CAPTION_VISIBLE_LINES * self._line_slot_height(), 96
+    def _layout_overhead(self) -> int:
+        """Espacio real del layout ahora: padding + slot chrome + HUD/notice."""
+        return 2 * self._padding() + int(self._chrome_slot_px) + self._hud_notice_overhead()
+
+    def _window_overhead(self) -> int:
+        """Reserva al dimensionar la ventana (chrome a máxima altura)."""
+        return (
+            2 * self._padding()
+            + _CHROME_CONTROLS_HEIGHT
+            + self._hud_notice_overhead()
         )
 
-    def _min_window_height(self) -> int:
-        return max(
-            _MIN_WINDOW_HEIGHT,
-            self._chrome_height() + self._line_slot_height(),
+    def _chrome_height(self) -> int:
+        """Alias de reserva de ventana (compat. tests / snap)."""
+        return self._window_overhead()
+
+    def _clamp_caption_lines(self, lines: int) -> int:
+        return max(_MIN_CAPTION_LINES, min(int(lines), _MAX_CAPTION_LINES))
+
+    def _height_for_lines(self, lines: int) -> int:
+        """Alto ventana para N líneas con chrome visible (reserva completa)."""
+        n = self._clamp_caption_lines(lines)
+        return self._window_overhead() + n * self._line_slot_height()
+
+    def _lines_from_height(
+        self, height: int, *, chrome_px: int | None = None
+    ) -> int:
+        """Líneas que caben. chrome_px=None → reserva máxima (snap de ventana)."""
+        line = max(1, self._line_slot_height())
+        chrome = (
+            _CHROME_CONTROLS_HEIGHT if chrome_px is None else max(0, int(chrome_px))
         )
+        avail = int(height) - 2 * self._padding() - chrome - self._hud_notice_overhead()
+        if avail <= 0:
+            return _MIN_CAPTION_LINES
+        return self._clamp_caption_lines(int(round(avail / line)))
+
+    def _snap_height_to_lines(self, height: int) -> int:
+        return self._height_for_lines(self._lines_from_height(height))
+
+    def _default_window_height(self) -> int:
+        return self._height_for_lines(_CAPTION_VISIBLE_LINES)
+
+    def _min_window_height(self) -> int:
+        return self._height_for_lines(_MIN_CAPTION_LINES)
 
     def _window_height(self) -> int:
         saved = self.config.get("window_height")
         if isinstance(saved, (int, float)):
-            return int(
-                max(
-                    _MIN_WINDOW_HEIGHT,
-                    min(int(saved), _MAX_WINDOW_HEIGHT),
-                )
-            )
+            return self._snap_height_to_lines(int(saved))
         return self._default_window_height()
 
     def _caption_viewport_height(self) -> int:
-        if self.height() > 0:
-            available = self.height() - self._chrome_height()
-            return max(available, self._line_slot_height())
-        return max(_CAPTION_VISIBLE_LINES * self._line_slot_height(), 96)
+        """Viewport = suelo del espacio libre del layout (múltiplo de línea)."""
+        line = max(1, self._line_slot_height())
+        h = self.height() if self.height() > 0 else self._default_window_height()
+        avail = int(h) - self._layout_overhead()
+        lines = self._clamp_caption_lines(max(_MIN_CAPTION_LINES, avail // line))
+        return lines * line
+
+    def _visible_caption_lines(self) -> int:
+        line = max(1, self._line_slot_height())
+        return max(_MIN_CAPTION_LINES, self._caption_viewport_height() // line)
 
     @staticmethod
     def _clamp_window_width(width: int) -> int:
@@ -795,6 +846,7 @@ class SubtitleOverlay(QtWidgets.QWidget):
         left, right, top, bottom = self._resize_edge
         min_w = _MIN_WINDOW_WIDTH
         min_h = self._min_window_height()
+        max_h = self._height_for_lines(_MAX_CAPTION_LINES)
 
         if left:
             new_left = geom.left() + delta.x()
@@ -805,43 +857,59 @@ class SubtitleOverlay(QtWidgets.QWidget):
             new_width = geom.width() + delta.x()
             if new_width >= min_w:
                 geom.setWidth(new_width)
-        if top:
-            new_top = geom.top() + delta.y()
-            new_height = geom.bottom() - new_top + 1
-            if new_height >= min_h:
-                geom.setTop(new_top)
-        if bottom:
-            new_height = geom.height() + delta.y()
-            if new_height >= min_h:
-                geom.setHeight(new_height)
+
+        # Vertical solo a saltos de líneas; el horizontal no toca la altura.
+        if top or bottom:
+            if top:
+                raw_h = geom.bottom() - (geom.top() + delta.y()) + 1
+            else:
+                raw_h = geom.height() + delta.y()
+            snapped = self._snap_height_to_lines(raw_h)
+            snapped = max(min_h, min(snapped, max_h))
+            if top:
+                geom.setTop(geom.bottom() - snapped + 1)
+            else:
+                geom.setHeight(snapped)
 
         geom.setWidth(self._clamp_window_width(geom.width()))
-        geom.setHeight(
-            max(min_h, min(geom.height(), _MAX_WINDOW_HEIGHT)),
-        )
-        self.setGeometry(geom)
+        if geom != self.geometry():
+            self.setGeometry(geom)
+            self._apply_caption_geometry()
+            self._position_chrome_bar()
 
     def _set_caption_label(self, label: QtWidgets.QLabel, text: str) -> bool:
-        """Actualiza el label solo si el texto plano cambió. True si hubo cambio."""
+        """Actualiza el label si cambió el texto o el alto de línea."""
         plain = text.strip() if text else ""
-        if label.property("captionPlain") == plain:
+        line_px = self._line_slot_height()
+        if (
+            label.property("captionPlain") == plain
+            and label.property("captionLinePx") == line_px
+        ):
             return False
         label.setProperty("captionPlain", plain)
+        label.setProperty("captionLinePx", line_px)
         if not plain:
             label.setTextFormat(QtCore.Qt.TextFormat.PlainText)
             label.setText("")
             return True
         escaped = html.escape(plain).replace("\n", "<br/>")
         label.setTextFormat(QtCore.Qt.TextFormat.RichText)
-        label.setText(
-            f'<div style="line-height:{_CAPTION_LINE_HEIGHT};">{escaped}</div>'
-        )
+        # line-height en px (no ratio): cada línea ocupa exactamente line_px.
+        label.setText(f'<div style="line-height:{line_px}px;">{escaped}</div>')
         return True
 
     def _apply_caption_geometry(self) -> None:
         self._caption_scroll.setFixedHeight(self._caption_viewport_height())
         self._sync_caption_body_size()
         self._scroll_captions_to_bottom()
+
+    def _ceil_to_line_slots(self, height: int) -> int:
+        line = self._line_slot_height()
+        if line <= 0:
+            return max(1, height)
+        h = max(0, int(height))
+        rem = h % line
+        return h if rem == 0 else h + (line - rem)
 
     def _sync_caption_body_size(self) -> bool:
         """Ajusta anchos/alturas del cuerpo. True si cambió la geometría."""
@@ -853,6 +921,12 @@ class SubtitleOverlay(QtWidgets.QWidget):
             changed = True
         total = 0
         visible = 0
+        body_layout = self._caption_body.layout()
+        if isinstance(body_layout, QtWidgets.QVBoxLayout):
+            margins = body_layout.contentsMargins()
+            if margins.top() or margins.bottom() or margins.left() or margins.right():
+                body_layout.setContentsMargins(0, 0, 0, 0)
+                changed = True
         for label in (
             self.translated_label,
             self.final_label,
@@ -866,7 +940,10 @@ class SubtitleOverlay(QtWidgets.QWidget):
                     label.setFixedHeight(0)
                     changed = True
                 continue
-            height = max(label.heightForWidth(width), label.fontMetrics().height())
+            # Con line-height en px, heightForWidth ya es múltiplo del slot.
+            height = self._ceil_to_line_slots(
+                max(label.heightForWidth(width), self._line_slot_height())
+            )
             if label.height() != height:
                 label.setFixedHeight(height)
                 changed = True
@@ -874,16 +951,21 @@ class SubtitleOverlay(QtWidgets.QWidget):
             visible += 1
         if visible:
             total += _CAPTION_BLOCK_SPACING * (visible - 1)
-        body_h = max(total, 1)
+        body_h = self._ceil_to_line_slots(max(total, 1))
         if self._caption_body.width() != width or self._caption_body.height() != body_h:
             self._caption_body.resize(width, body_h)
             changed = True
         return changed
 
     def _scroll_captions_to_bottom(self) -> None:
+        """Ancla abajo alineado a límites de línea: nunca corta una línea a medias."""
         bar = self._caption_scroll.verticalScrollBar()
-        if bar.value() != bar.maximum():
-            bar.setValue(bar.maximum())
+        line = self._line_slot_height()
+        target = int(bar.maximum())
+        if line > 0 and target > 0:
+            target -= target % line
+        if bar.value() != target:
+            bar.setValue(target)
 
     def _trim_display(self, text: str) -> str:
         if len(text) <= _MAX_DISPLAY_CHARS:
@@ -953,7 +1035,7 @@ class SubtitleOverlay(QtWidgets.QWidget):
                 font-family: monospace;
             }}
             QWidget#chromeBar {{
-                background: transparent;
+                background: rgba(0, 0, 0, 0.40);
                 border-radius: 8px;
             }}
             QPushButton#translateToggle {{
@@ -1006,7 +1088,7 @@ class SubtitleOverlay(QtWidgets.QWidget):
         pad = int(config.get("padding", 24))
         layout = self.panel.layout()
         if layout is not None:
-            layout.setContentsMargins(pad, pad // 2, pad, pad // 2)
+            layout.setContentsMargins(pad, pad, pad, pad)
         self.lang_label.setText(str(config.get("language", "en")).upper())
         self.translate_btn.blockSignals(True)
         self.translate_btn.setChecked(bool(config.get("translation_enabled", False)))
@@ -1018,11 +1100,15 @@ class SubtitleOverlay(QtWidgets.QWidget):
             self._clamp_window_width(int(config.get("window_width", 900))),
             self._window_height(),
         )
+        self.setMinimumSize(_MIN_WINDOW_WIDTH, self._min_window_height())
         self._apply_text_align()
         self._apply_style()
         self._sync_translation_ui()
+        # Reaplica rich text con el line-height px del font actual.
+        self._refresh_caption_texts()
         self._sync_debug_hud()
         self._apply_caption_geometry()
+        self._position_chrome_bar()
         desired = bool(config.get("always_on_top", True))
         if desired != self._always_on_top:
             self.set_always_on_top(desired)
@@ -1374,6 +1460,7 @@ class SubtitleOverlay(QtWidgets.QWidget):
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
         super().resizeEvent(event)
         self._apply_caption_geometry()
+        self._position_chrome_bar()
 
     def _handle_mouse_press(self, event: QtGui.QMouseEvent, *, window_pos: QtCore.QPoint) -> bool:
         if event.button() == QtCore.Qt.MouseButton.RightButton:
@@ -1409,6 +1496,14 @@ class SubtitleOverlay(QtWidgets.QWidget):
 
     def _handle_mouse_release(self) -> None:
         if self._resize_edge is not None:
+            snapped = self._snap_height_to_lines(self.height())
+            if snapped != self.height():
+                bottom = self.y() + self.height()
+                self._ignore_move_save = True
+                try:
+                    self.setGeometry(self.x(), bottom - snapped, self.width(), snapped)
+                finally:
+                    self._ignore_move_save = False
             self._persist_geometry()
         self._resize_edge = None
         self._resize_start_pos = None
