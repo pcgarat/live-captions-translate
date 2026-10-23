@@ -684,7 +684,8 @@ make uninstall-user PURGE_CONFIG=1  # elimina también la configuración XDG
    inmediata, más reescrituras visibles).
 4. Activa el destino si quieres traducción y decide qué compone la segunda línea.
 5. Coloca el overlay: arrastre por `startSystemMove()` con respaldo manual por offset, y
-   la geometría se persiste con debounce.
+   la geometría se persiste con debounce (también al redimensionar, con el borde en píxeles
+   libres). La apariencia se guarda al Guardar en Ajustes y al cerrar la app.
 6. **✕** cierra y detiene captura e inferencia de forma cooperativa.
 
 Clic derecho sobre el overlay: menú propio (*Siempre encima*, ocultar, configuración, HUD
