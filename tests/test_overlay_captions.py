@@ -731,6 +731,7 @@ def test_vertical_resize_clamps_to_min_and_max(
     start = QtCore.QPoint(200, ov.height())
     ov._begin_resize((False, False, False, True), start)
     ov._continue_resize(start + QtCore.QPoint(0, -10000))
+    assert ov.height() == 48
     assert ov.height() == ov._min_window_height()
     ov._continue_resize(start + QtCore.QPoint(0, 10000))
     assert ov.height() == _MAX_WINDOW_HEIGHT

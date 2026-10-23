@@ -14,9 +14,9 @@ se restaura exactamente igual en el siguiente arranque. La apariencia completa
 ## Modelo de geometría
 
 - **Alto de ventana**: píxeles continuos en `[_MIN_WINDOW_HEIGHT, _MAX_WINDOW_HEIGHT]`
-  (120–1600, los mismos clamps de `validate_config`).
-- **Suelo del overlay**: `max(120, 2·padding + chrome + 1 línea)`. No incluye HUD ni
-  aviso, que son transitorios: el mínimo no cambia al aparecer un aviso.
+  (48–1600, los mismos clamps de `validate_config`).
+- **Suelo del overlay**: 48 px fijos. No crece con padding, chrome, fuente, HUD ni
+  aviso. Por debajo de una línea el viewport recorta el texto.
 - **Viewport de captions**: `alto_ventana − (2·padding + slot_chrome + hud/notice)`, en
   píxeles libres. Ya **no** se redondea a múltiplos de línea.
 - Se eliminan `_MIN_CAPTION_LINES`, `_MAX_CAPTION_LINES`, `_lines_from_height()`,

@@ -30,7 +30,7 @@ _RESIZE_MARGIN = 8
 _MIN_WINDOW_WIDTH = 300
 _MAX_WINDOW_WIDTH = 2400
 # Alto continuo en px (mismos clamps que validate_config).
-_MIN_WINDOW_HEIGHT = 120
+_MIN_WINDOW_HEIGHT = 48
 _MAX_WINDOW_HEIGHT = 1600
 # Margen inferior en primer arranque / reclamp (no pegar al borde).
 _BOTTOM_MARGIN_PX = 48
@@ -136,6 +136,7 @@ class SubtitleOverlay(QtWidgets.QWidget):
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
+        root.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetNoConstraint)
 
         self.panel = QtWidgets.QFrame()
         self.panel.setObjectName("captionPanel")
@@ -149,6 +150,7 @@ class SubtitleOverlay(QtWidgets.QWidget):
         # Padding simétrico: alto ventana = 2*pad + chrome + N*línea.
         panel_layout.setContentsMargins(pad, pad, pad, pad)
         panel_layout.setSpacing(0)
+        panel_layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetNoConstraint)
 
         # Reserva dinámica: altura = slot del chrome (0 oculto → captions usan el hueco).
         self.chrome_spacer = QtWidgets.QWidget()
@@ -737,13 +739,8 @@ class SubtitleOverlay(QtWidgets.QWidget):
         return self._height_for_lines(_CAPTION_VISIBLE_LINES)
 
     def _min_window_height(self) -> int:
-        """Suelo: el que quepa al menos una línea con padding y chrome.
-
-        HUD y aviso quedan fuera a propósito: son transitorios y no deben
-        cambiar el mínimo de la ventana cuando aparecen.
-        """
-        floor = 2 * self._padding() + _CHROME_CONTROLS_HEIGHT + self._line_slot_height()
-        return min(max(_MIN_WINDOW_HEIGHT, floor), _MAX_WINDOW_HEIGHT)
+        """Suelo fijo en px. El texto que no quepa se recorta en el viewport."""
+        return _MIN_WINDOW_HEIGHT
 
     @staticmethod
     def _clamp_window_height(height: int) -> int:
@@ -758,7 +755,7 @@ class SubtitleOverlay(QtWidgets.QWidget):
     def _caption_viewport_height(self) -> int:
         """Espacio libre para captions en px, sin cuantizar."""
         h = self.height() if self.height() > 0 else self._default_window_height()
-        return max(self._line_slot_height(), int(h) - self._layout_overhead())
+        return max(0, int(h) - self._layout_overhead())
 
     @staticmethod
     def _clamp_window_width(width: int) -> int:
