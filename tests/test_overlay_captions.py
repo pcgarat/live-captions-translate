@@ -8,7 +8,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6 import QtWidgets
+from PyQt6 import QtCore, QtWidgets
 
 from src.asr.types import CaptionUpdate
 from src.config import apply_app_preset, validate_config
@@ -651,7 +651,6 @@ def test_reset_appends_when_overlay_overflows(
 
 
 def test_resize_hit_test_detects_edges(qapp: QtWidgets.QApplication) -> None:
-    from PyQt6 import QtCore
 
     ov, _q = _overlay(qapp)
     ov.resize(400, 200)
@@ -664,8 +663,6 @@ def test_resize_hit_test_detects_edges(qapp: QtWidgets.QApplication) -> None:
 
 
 def test_resize_from_right_updates_width(qapp: QtWidgets.QApplication) -> None:
-    from PyQt6 import QtCore
-
     ov, _q = _overlay(qapp, cfg={"window_width": 400, "window_height": 200})
     ov.show()
     qapp.processEvents()
@@ -682,44 +679,73 @@ def test_resize_from_right_updates_width(qapp: QtWidgets.QApplication) -> None:
     ov.close()
 
 
-def test_vertical_resize_snaps_to_caption_lines(
+def test_vertical_resize_is_continuous(
     qapp: QtWidgets.QApplication,
 ) -> None:
-    from PyQt6 import QtCore
-
+    """El alto cambia píxel a píxel: nada de saltos de línea."""
     ov, _q = _overlay(qapp, cfg={"window_width": 400, "font_size": 22})
     ov._chrome_hide_timer.stop()
-    line = ov._line_slot_height()
     start_h = ov._height_for_lines(2)
     ov.resize(400, start_h)
     ov._apply_caption_geometry()
-    # Chrome oculto: el hueco del chrome se suma al viewport (~+1 línea).
     assert ov._chrome_slot_px == 0
-    assert ov._caption_scroll.height() == ov._visible_caption_lines() * line
-    assert ov._visible_caption_lines() >= 2
+    assert ov._caption_scroll.height() == ov._caption_viewport_height()
 
     start = QtCore.QPoint(200, start_h)
     ov._begin_resize((False, False, False, True), start)
-    # Justo por encima del punto medio entre 2 y 3 líneas.
-    ov._continue_resize(start + QtCore.QPoint(0, line // 2 + 1))
-    assert ov.height() == ov._height_for_lines(3)
-    assert ov._caption_scroll.height() == ov._visible_caption_lines() * line
+    for delta in (1, 3, 7):
+        ov._continue_resize(start + QtCore.QPoint(0, delta))
+        assert ov.height() == start_h + delta
+    # Un delta menor que una línea (44 px) sí mueve la ventana.
+    assert ov.height() == start_h + 7
     ov._handle_mouse_release()
-    assert ov.config["window_height"] == ov._height_for_lines(3)
+    assert ov.config["window_height"] == start_h + 7
     ov.close()
 
 
-def test_window_height_restore_snaps_to_lines(
+def test_vertical_resize_from_top_sets_height_continuously(
+    qapp: QtWidgets.QApplication,
+) -> None:
+    ov, _q = _overlay(qapp, cfg={"window_width": 400, "window_height": 400})
+    ov.show()
+    qapp.processEvents()
+    bottom = ov.y() + ov.height()
+    start = QtCore.QPoint(200, 0)
+    ov._begin_resize((False, False, True, False), start)
+    ov._continue_resize(start + QtCore.QPoint(0, 13))
+    assert ov.height() == 387
+    assert ov.y() + ov.height() == bottom
+    ov._handle_mouse_release()
+    assert ov.config["window_height"] == 387
+    ov.close()
+
+
+def test_vertical_resize_clamps_to_min_and_max(
+    qapp: QtWidgets.QApplication,
+) -> None:
+    from src.ui.overlay import _MAX_WINDOW_HEIGHT
+
+    ov, _q = _overlay(qapp, cfg={"window_width": 400})
+    ov.show()
+    qapp.processEvents()
+    start = QtCore.QPoint(200, ov.height())
+    ov._begin_resize((False, False, False, True), start)
+    ov._continue_resize(start + QtCore.QPoint(0, -10000))
+    assert ov.height() == ov._min_window_height()
+    ov._continue_resize(start + QtCore.QPoint(0, 10000))
+    assert ov.height() == _MAX_WINDOW_HEIGHT
+    ov.close()
+
+
+def test_window_height_restore_keeps_exact_pixels(
     qapp: QtWidgets.QApplication,
 ) -> None:
     ov, _q = _overlay(
         qapp,
-        cfg={"window_width": 400, "window_height": 203, "font_size": 22},
+        cfg={"window_width": 400, "window_height": 333, "font_size": 22},
     )
-    assert ov.height() == ov._snap_height_to_lines(203)
-    assert ov.height() == ov._chrome_height() + (
-        ov._lines_from_height(ov.height()) * ov._line_slot_height()
-    )
+    assert ov.height() == 333
+    assert ov._window_height() == 333
     ov.close()
 
 
@@ -730,14 +756,14 @@ def test_restore_geometry_applies_saved_size(
         qapp,
         cfg={
             "window_width": 640,
-            "window_height": 240,
+            "window_height": 247,
             "window_pos": [40, 60],
         },
     )
     ov.resize(900, 120)
     ov._restore_geometry()
     assert ov.width() == 640
-    assert ov.height() == ov._snap_height_to_lines(240)
+    assert ov.height() == 247
     ov.close()
 
 
@@ -829,10 +855,10 @@ def test_caption_scroll_pins_to_bottom(qapp: QtWidgets.QApplication) -> None:
     ov.close()
 
 
-def test_short_caption_has_no_phantom_top_line(
+def test_short_caption_is_vertically_centered(
     qapp: QtWidgets.QApplication,
 ) -> None:
-    """Con menos líneas que el viewport, no debe quedar una línea vacía arriba."""
+    """Con menos contenido que el viewport, el bloque queda centrado."""
     from src.ui.overlay import _CAPTION_VISIBLE_LINES
 
     ov, _ = _overlay(
@@ -846,8 +872,7 @@ def test_short_caption_has_no_phantom_top_line(
         },
     )
     ov._chrome_hide_timer.stop()
-    lines = _CAPTION_VISIBLE_LINES
-    target = ov._height_for_lines(lines)
+    target = ov._height_for_lines(_CAPTION_VISIBLE_LINES)
     ov.config["window_height"] = target
     ov.resize(900, target)
     ov.show()
@@ -862,24 +887,12 @@ def test_short_caption_has_no_phantom_top_line(
     ov._apply_caption_geometry()
     qapp.processEvents()
 
-    line = ov._line_slot_height()
     body_h = ov._caption_body.height()
     view_h = ov._caption_scroll.height()
     assert body_h < view_h  # menos contenido que el viewport
-    assert body_h >= line
-    # Sin AlignBottom: el cuerpo empieza arriba, no una línea más abajo.
-    assert ov._caption_body.y() == 0
-    img = ov._caption_scroll.viewport().grab().toImage()
-
-    def ink(y: int) -> int:
-        return sum(
-            1
-            for x in range(img.width())
-            if sum(img.pixelColor(x, y).getRgb()[:3]) > 80
-        )
-
-    first = next(y for y in range(img.height()) if ink(y) > 5)
-    assert first < line, f"línea fantasma arriba: first_ink={first} line={line}"
+    # Aire repartido: el cuerpo no toca arriba ni abajo.
+    assert ov._caption_body.y() > 0
+    assert abs(ov._caption_body.y() - (view_h - body_h - ov._caption_body.y())) <= 1
     ov.close()
 
 
@@ -917,8 +930,6 @@ def test_reset_display_keeps_caption_until_next_phrase(
 
 
 def test_apply_config_text_align_left(qapp: QtWidgets.QApplication) -> None:
-    from PyQt6 import QtCore
-
     ov, _q = _overlay(qapp)
     assert (
         ov.final_label.alignment() & QtCore.Qt.AlignmentFlag.AlignHCenter
@@ -1080,7 +1091,6 @@ def test_ensure_on_top_timer_does_not_restack_when_hint_ok(
     qapp: QtWidgets.QApplication, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """El tick periódico no debe raise_/wmctrl si el hint sigue activo."""
-    from PyQt6 import QtCore
 
     ov, _q = _overlay(qapp, cfg={"always_on_top": True})
     ov.show()
@@ -1107,7 +1117,6 @@ def test_ensure_on_top_timer_does_not_restack_when_hint_ok(
 def test_ensure_on_top_repairs_missing_hint(
     qapp: QtWidgets.QApplication, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from PyQt6 import QtCore
 
     ov, _q = _overlay(qapp, cfg={"always_on_top": True})
     ov.show()
@@ -1314,7 +1323,7 @@ def test_line_slot_tracks_font_size_and_line_height(
 def test_window_height_is_exact_padding_chrome_and_lines(
     qapp: QtWidgets.QApplication,
 ) -> None:
-    """Ventana = 2×pad + chrome_reserva + N×línea; viewport usa el hueco si chrome oculto."""
+    """Ventana = 2×pad + chrome + N×línea exactos; el viewport es el hueco real."""
     from src.ui.overlay import _CHROME_CONTROLS_HEIGHT
 
     for font_size, padding, lines in ((22, 16, 2), (28, 24, 3), (40, 32, 4)):
@@ -1339,11 +1348,11 @@ def test_window_height_is_exact_padding_chrome_and_lines(
         qapp.processEvents()
 
         assert ov.height() == target
-        # Chrome oculto: captions ocupan el hueco (si cabe ≥1 línea extra).
+        # Chrome oculto: captions ocupan el hueco (sin cuantizar).
         assert ov._chrome_slot_px == 0
         assert ov.chrome_spacer.height() == 0
-        assert ov._caption_scroll.height() == ov._visible_caption_lines() * line
-        assert ov._visible_caption_lines() >= lines
+        assert ov._caption_scroll.height() == ov._caption_viewport_height()
+        assert ov._caption_scroll.height() >= lines * line
 
         ov._reveal_chrome()
         qapp.processEvents()
@@ -1358,10 +1367,10 @@ def test_window_height_is_exact_padding_chrome_and_lines(
         ov.close()
 
 
-def test_long_caption_scroll_aligns_to_line_slots(
+def test_long_caption_keeps_latest_line_visible(
     qapp: QtWidgets.QApplication,
 ) -> None:
-    """Con texto largo, el borde superior del viewport cae en un límite de línea."""
+    """Con texto largo, el scroll se ancla al final: no se pierde la última línea."""
     ov, _ = _overlay(
         qapp,
         cfg={
@@ -1373,8 +1382,7 @@ def test_long_caption_scroll_aligns_to_line_slots(
         },
     )
     ov._chrome_hide_timer.stop()
-    lines = 2
-    target = ov._height_for_lines(lines)
+    target = ov._height_for_lines(2)
     ov.config["window_height"] = target
     ov.resize(700, target)
     ov.show()
@@ -1393,13 +1401,13 @@ def test_long_caption_scroll_aligns_to_line_slots(
     line = ov._line_slot_height()
     body_h = ov._caption_body.height()
     view_h = ov._caption_scroll.height()
-    visible = ov._visible_caption_lines()
     assert body_h % line == 0
-    assert view_h == visible * line
+    assert view_h == ov._caption_viewport_height()
     assert body_h >= view_h
     bar = ov._caption_scroll.verticalScrollBar()
-    assert bar.value() % line == 0
-    assert ov._caption_body.y() % line == 0
+    assert bar.value() == bar.maximum()
+    # El final del cuerpo coincide con el borde inferior del viewport.
+    assert ov._caption_body.y() + body_h == view_h
     ov.close()
 
 
@@ -1423,7 +1431,7 @@ def test_chrome_overlay_does_not_move_window_or_captions(
     assert ov.chrome_bar.isHidden()
     assert ov.chrome_spacer.height() == 0
     hidden_h = ov._caption_scroll.height()
-    assert hidden_h == ov._visible_caption_lines() * line
+    assert hidden_h == ov._caption_viewport_height()
 
     ov._reveal_chrome()
     qapp.processEvents()
@@ -1483,3 +1491,76 @@ def test_chrome_reveal_hide_cycle_keeps_geometry(
         assert ov.chrome_spacer.height() == 0
         assert ov._caption_scroll.height() == hidden_caption
     ov.close()
+
+
+def test_resize_while_visible_persists_size(
+    qapp: QtWidgets.QApplication,
+) -> None:
+    """Un resize que no viene del ratón (apply_config/WM) también se guarda."""
+    saved: dict = {}
+    q: queue.Queue[CaptionUpdate] = queue.Queue()
+    ov = SubtitleOverlay(
+        text_queue=q,
+        config=validate_config({"window_width": 700, "window_height": 240}),
+        on_save_config=saved.update,
+    )
+    ov._timer.stop()
+    ov.show()
+    qapp.processEvents()
+    ov.resize(700, 321)
+    qapp.processEvents()
+    ov._save_pos_timer.stop()
+    ov._persist_geometry()
+    assert saved["window_height"] == 321
+    assert saved["window_width"] == 700
+    ov.close()
+
+
+def test_appearance_and_geometry_survive_restart(
+    qapp: QtWidgets.QApplication,
+) -> None:
+    """Todo lo visual y la geometría vuelven iguales en el siguiente arranque."""
+    saved: dict = {}
+    cfg = validate_config(
+        {
+            "font_size": 31,
+            "font_family": "DejaVu Sans",
+            "font_weight": "bold",
+            "font_color": "#ffee00",
+            "bg_color": "#102030",
+            "bg_alpha": 0.8,
+            "padding": 17,
+            "text_align": "center",
+            "always_on_top": False,
+            "window_width": 811,
+            "window_height": 333,
+            "window_pos": [120, 240],
+        }
+    )
+    ov = SubtitleOverlay(
+        text_queue=queue.Queue(), config=cfg, on_save_config=saved.update
+    )
+    ov._timer.stop()
+    ov.show()
+    qapp.processEvents()
+    ov._restore_geometry()
+    ov._persist_geometry()
+    qapp.processEvents()
+    ov.close()
+
+    # Segundo arranque: solo la config guardada.
+    ov2 = SubtitleOverlay(text_queue=queue.Queue(), config=dict(saved))
+    ov2._timer.stop()
+    ov2.show()
+    qapp.processEvents()
+    ov2._restore_geometry()
+    qapp.processEvents()
+    assert (ov2.x(), ov2.y()) == (120, 240)
+    assert (ov2.width(), ov2.height()) == (811, 333)
+    assert ov2._padding() == 17
+    assert ov2._line_slot_height() == ov._line_slot_height()
+    assert 'font-family: "DejaVu Sans"' in ov2.styleSheet()
+    assert "font-weight: 700;" in ov2.styleSheet()
+    assert "#ffee00" in ov2.styleSheet()
+    assert ov2._caption_h_align() == QtCore.Qt.AlignmentFlag.AlignHCenter
+    ov2.close()

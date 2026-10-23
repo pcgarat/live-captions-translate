@@ -1,4 +1,4 @@
-Última modificación: 2026-09-18
+Última modificación: 2026-10-23
 
 # Developers guide — whisperLiveCaptionsLinux
 
@@ -461,7 +461,7 @@ Clamps decode: `beam_size` 1–8, `length_penalty` 0.6–1.5, `no_repeat_ngram_s
 | `bg_alpha`                       | `0.55`                | 0.05–1.0           |
 | `padding`                        | `24`                  | 0–100 px           |
 | `text_align`                     | `center`              | `center`           |
-| `window_*` / `settings_window_*` | geometría             | Persistidos por UI |
+| `window_*` / `settings_window_*` | geometría             | Persistidos por UI; alto del overlay en px libres (120–1600, sin cuantizar a líneas) |
 | `app_preset` / `app_presets`     | `default` / `{default: …}` | Snapshot de fábrica + mapa de presets |
 
 
