@@ -969,7 +969,7 @@ def validate_config(
     if height is None:
         cfg["window_height"] = None
     else:
-        cfg["window_height"] = int(_clamp(int(height), 120, 1600))
+        cfg["window_height"] = int(_clamp(int(height), 48, 1600))
     cfg["settings_window_width"] = int(
         _clamp(int(cfg.get("settings_window_width", 560)), 520, 2000)
     )

@@ -564,7 +564,7 @@ Clamps: `beam_size` ∈ [1, 8], `length_penalty` ∈ [0.6, 1.5],
 | `bg_alpha` | `0.6` | 0.05–1.0 |
 | `padding` | `20` | 0–100 px |
 | `text_align` | `left` | `center` \| `left` |
-| `window_*` | 900×170 | Ancho 300–2400, alto 120–1600 |
+| `window_*` | 900×170 | Ancho 300–2400, alto 48–1600 |
 | `settings_window_*` | 858×920 | Ancho 520–2000, alto 640–1600 |
 | `app_preset` / `app_presets` | `video-en-es` | Preset activo y mapa de snapshots |
 

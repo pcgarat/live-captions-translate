@@ -94,7 +94,8 @@ def test_validate_clamps_ranges() -> None:
 def test_window_height_clamps() -> None:
     assert validate_config({})["window_height"] == DEFAULTS["window_height"]
     assert validate_config({"window_height": 500})["window_height"] == 500
-    assert validate_config({"window_height": 50})["window_height"] == 120
+    assert validate_config({"window_height": 50})["window_height"] == 50
+    assert validate_config({"window_height": 10})["window_height"] == 48
     assert validate_config({"window_height": 9999})["window_height"] == 1600
 
 
