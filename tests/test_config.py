@@ -6,16 +6,20 @@ from pathlib import Path
 from src.config import (
     DEFAULTS,
     LATENCY_FACTORY_PRESETS,
+    LATENCY_LEGACY_PRESET_ID,
     TRANSLATION_FACTORY_PRESETS,
     add_translation_user_preset,
-    beam_size_for_mode,
+    delete_latency_user_preset,
     delete_translation_user_preset,
     effective_latency_profile,
     effective_translation_decode,
     factory_app_preset_ids,
+    latency_user_preset_ids,
     load_config,
     reset_latency_profile,
     save_config,
+    save_latency_preset,
+    save_latency_preset_as,
     slugify_translation_preset_name,
     validate_config,
 )
@@ -66,10 +70,11 @@ def test_validate_clamps_ranges() -> None:
             "compute_type": "nope",
             "latency_mode": "nope",
             "latency_profiles": {
-                "stable": {
+                "mio": {
                     "agreement_n": 99,
                     "max_latency_sec": 0.1,
                     "min_chunk_seconds": 0.01,
+                    "beam_size": 99,
                 }
             },
         }
@@ -80,9 +85,10 @@ def test_validate_clamps_ranges() -> None:
     assert cfg["text_align"] == "center"
     assert cfg["compute_type"] == "float16"
     assert cfg["latency_mode"] == "stable"
-    assert cfg["latency_profiles"]["stable"]["agreement_n"] == 5
-    assert cfg["latency_profiles"]["stable"]["max_latency_sec"] == 0.2
-    assert cfg["latency_profiles"]["stable"]["min_chunk_seconds"] == 0.2
+    assert cfg["latency_profiles"]["mio"]["agreement_n"] == 5
+    assert cfg["latency_profiles"]["mio"]["max_latency_sec"] == 0.2
+    assert cfg["latency_profiles"]["mio"]["min_chunk_seconds"] == 0.2
+    assert cfg["latency_profiles"]["mio"]["beam_size"] == 8
 
 
 def test_window_height_clamps() -> None:
@@ -142,7 +148,8 @@ def test_font_weight_normalize() -> None:
     assert validate_config({"font_weight": 700})["font_weight"] == "semibold"
 
 
-def test_migrate_legacy_top_level_into_active_mode() -> None:
+def test_migrate_legacy_top_level_into_own_preset() -> None:
+    """Los knobs de fase 1 no pueden caer en un preset de fábrica (es inmutable)."""
     cfg = validate_config(
         {
             "latency_mode": "low",
@@ -150,8 +157,12 @@ def test_migrate_legacy_top_level_into_active_mode() -> None:
             "min_chunk_seconds": 1.2,
         }
     )
-    assert cfg["latency_profiles"]["low"]["agreement_n"] == 3
-    assert abs(cfg["latency_profiles"]["low"]["min_chunk_seconds"] - 1.2) < 1e-9
+    legacy = cfg["latency_profiles"][LATENCY_LEGACY_PRESET_ID]
+    assert legacy["agreement_n"] == 3
+    assert abs(legacy["min_chunk_seconds"] - 1.2) < 1e-9
+    # El resto de knobs hereda los del modo que estaba activo.
+    assert legacy["beam_size"] == LATENCY_FACTORY_PRESETS["low"]["beam_size"]
+    assert cfg["latency_mode"] == LATENCY_LEGACY_PRESET_ID
     assert cfg["latency_profiles"]["stable"] == LATENCY_FACTORY_PRESETS["stable"]
     assert effective_latency_profile(cfg)["agreement_n"] == 3
 
@@ -163,26 +174,30 @@ def test_save_and_load_roundtrip_preserves_profiles(tmp_path: Path) -> None:
             "language": "en",
             "font_size": 40,
             "bg_alpha": 0.33,
-            "latency_mode": "low",
+            "latency_mode": "mi-perfil",
             "latency_profiles": {
                 "stable": dict(LATENCY_FACTORY_PRESETS["stable"]),
-                "low": {
+                "mi-perfil": {
                     "agreement_n": 1,
                     "max_latency_sec": 0.8,
                     "min_chunk_seconds": 0.4,
+                    "beam_size": 3,
                 },
             },
         },
         path,
     )
     raw = json.loads(path.read_text(encoding="utf-8"))
-    assert raw["latency_mode"] == "low"
-    assert abs(raw["latency_profiles"]["low"]["max_latency_sec"] - 0.8) < 1e-9
+    assert raw["latency_mode"] == "mi-perfil"
+    assert abs(raw["latency_profiles"]["mi-perfil"]["max_latency_sec"] - 0.8) < 1e-9
     loaded = load_config(path)
     assert loaded["font_size"] == 40
     assert abs(loaded["bg_alpha"] - 0.33) < 1e-9
-    assert loaded["latency_mode"] == "low"
-    assert abs(loaded["latency_profiles"]["low"]["min_chunk_seconds"] - 0.4) < 1e-9
+    assert loaded["latency_mode"] == "mi-perfil"
+    assert (
+        abs(loaded["latency_profiles"]["mi-perfil"]["min_chunk_seconds"] - 0.4) < 1e-9
+    )
+    assert loaded["latency_profiles"]["mi-perfil"]["beam_size"] == 3
 
 
 def test_save_and_load_roundtrip_preserves_translation_flags(tmp_path: Path) -> None:
@@ -254,9 +269,86 @@ def test_installed_languages_includes_active_language() -> None:
     assert "es" in cfg["installed_languages"]
 
 
-def test_beam_size_for_mode() -> None:
-    assert beam_size_for_mode("stable") == 5
-    assert beam_size_for_mode("low") == 1
+def test_effective_latency_profile_uses_preset_beam_size() -> None:
+    cfg = validate_config(
+        {
+            "latency_mode": "mi-perfil",
+            "latency_profiles": {
+                "mi-perfil": {
+                    "agreement_n": 3,
+                    "max_latency_sec": 1.1,
+                    "min_chunk_seconds": 0.5,
+                    "beam_size": 3,
+                },
+            },
+        }
+    )
+    profile = effective_latency_profile(cfg)
+    assert profile["beam_size"] == 3
+    assert profile["agreement_n"] == 3
+    assert cfg["latency_mode"] == "mi-perfil"
+
+
+def test_latency_user_presets_crud() -> None:
+    base = validate_config({})
+    assert latency_user_preset_ids(base) == []
+
+    created = save_latency_preset_as(base, "Mi Perfil", {"agreement_n": 3})
+    assert created["latency_mode"] == "mi-perfil"
+    assert latency_user_preset_ids(created) == ["mi-perfil"]
+    assert created["latency_profiles"]["mi-perfil"]["agreement_n"] == 3
+
+    overwritten = save_latency_preset(
+        created, "mi-perfil", {"max_latency_sec": 2.0}
+    )
+    assert overwritten["latency_profiles"]["mi-perfil"]["max_latency_sec"] == 2.0
+    # Lo no enviado hereda del perfil anterior, no se resetea.
+    assert overwritten["latency_profiles"]["mi-perfil"]["agreement_n"] == 3
+
+    deleted = delete_latency_user_preset(overwritten, "mi-perfil")
+    assert latency_user_preset_ids(deleted) == []
+    assert deleted["latency_mode"] == "stable"
+
+
+def test_factory_latency_presets_are_immutable() -> None:
+    cfg = validate_config(
+        {
+            "latency_profiles": {
+                "stable": {
+                    "agreement_n": 5,
+                    "max_latency_sec": 3.0,
+                    "min_chunk_seconds": 5.0,
+                    "beam_size": 8,
+                }
+            }
+        }
+    )
+    assert cfg["latency_profiles"]["stable"] == LATENCY_FACTORY_PRESETS["stable"]
+
+    try:
+        save_latency_preset(cfg, "stable", {"agreement_n": 4})
+        raise AssertionError("expected factory overwrite rejected")
+    except ValueError as exc:
+        assert "fábrica" in str(exc).lower()
+    try:
+        delete_latency_user_preset(cfg, "stable")
+        raise AssertionError("expected factory delete rejected")
+    except ValueError as exc:
+        assert "fábrica" in str(exc).lower()
+    try:
+        save_latency_preset_as(cfg, "Stable")
+        raise AssertionError("expected reserved name rejected")
+    except ValueError as exc:
+        assert "reservado" in str(exc).lower()
+
+
+def test_save_latency_as_rejects_collision() -> None:
+    cfg = save_latency_preset_as(validate_config({}), "estudio")
+    try:
+        save_latency_preset_as(cfg, "Estudio")
+        raise AssertionError("expected collision")
+    except ValueError as exc:
+        assert "existe" in str(exc).lower()
 
 
 def test_reset_latency_profile_restores_factory() -> None:
@@ -264,22 +356,18 @@ def test_reset_latency_profile_restores_factory() -> None:
         {
             "latency_mode": "low",
             "latency_profiles": {
-                "low": {
-                    "agreement_n": 4,
-                    "max_latency_sec": 2.5,
-                    "min_chunk_seconds": 1.0,
-                },
                 "stable": {
                     "agreement_n": 5,
-                    "max_latency_sec": 4.0,
-                    "min_chunk_seconds": 1.5,
+                    "max_latency_sec": 2.5,
+                    "min_chunk_seconds": 1.0,
                 },
             },
         }
     )
     reset = reset_latency_profile(cfg, "low")
     assert reset["latency_profiles"]["low"] == LATENCY_FACTORY_PRESETS["low"]
-    assert reset["latency_profiles"]["stable"]["agreement_n"] == 5
+    # Los presets de fábrica se re-sincronizan siempre: `stable` vuelve al suyo.
+    assert reset["latency_profiles"]["stable"] == LATENCY_FACTORY_PRESETS["stable"]
 
 
 def test_translation_decode_defaults_and_factory_resync() -> None:

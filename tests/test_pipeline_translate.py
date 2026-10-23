@@ -194,13 +194,15 @@ def test_apply_latency_settings_updates_streamer_and_pump() -> None:
     pipeline._engine = WhisperEngine(language="en", beam_size=5)
     pipeline._pump = ChunkPump(AudioRingBuffer(), min_chunk_seconds=0.8)
 
-    cfg["latency_mode"] = "low"
+    cfg["latency_mode"] = "mi-perfil"
     cfg["latency_profiles"] = {
         "stable": dict(cfg["latency_profiles"]["stable"]),
-        "low": {
+        "low": dict(cfg["latency_profiles"]["low"]),
+        "mi-perfil": {
             "agreement_n": 3,
             "max_latency_sec": 2.0,
             "min_chunk_seconds": 0.4,
+            "beam_size": 3,
         },
     }
     cfg = validate_config(cfg)
@@ -209,8 +211,8 @@ def test_apply_latency_settings_updates_streamer_and_pump() -> None:
     assert pipeline._streamer.agreement_n == 3
     assert abs(pipeline._streamer.max_latency_sec - 2.0) < 1e-9
     assert abs(pipeline._pump.min_chunk_seconds - 0.4) < 1e-9
-    assert pipeline._engine.beam_size == 1
-    assert pipeline.config["latency_mode"] == "low"
+    assert pipeline._engine.beam_size == 3
+    assert pipeline.config["latency_mode"] == "mi-perfil"
 
 
 def test_emit_committed_translates_delta_and_appends_flag() -> None:

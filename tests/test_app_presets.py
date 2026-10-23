@@ -152,3 +152,38 @@ def test_apply_unknown_raises() -> None:
         raise AssertionError("expected unknown preset")
     except ValueError as exc:
         assert "desconocido" in str(exc).lower()
+
+
+def test_save_as_leaves_live_config_at_saved_values() -> None:
+    """Tras guardar, el preset no debe nacer «modificado» respecto a la config."""
+    from src.preset_state import DOMAIN_APP, changed_option_keys, preset_values
+
+    base = validate_config({"font_size": 30})
+    saved = save_app_preset_as(
+        base, "estudio", snapshot_src={**base, "font_size": 44}
+    )
+    assert saved["font_size"] == 44
+    assert changed_option_keys(
+        DOMAIN_APP, preset_values(DOMAIN_APP, saved, "estudio"), saved
+    ) == []
+
+
+def test_overwrite_leaves_live_config_at_saved_values() -> None:
+    from src.preset_state import DOMAIN_APP, changed_option_keys, preset_values
+
+    cfg = save_app_preset_as(validate_config({"font_size": 30}), "estudio")
+    overwritten = save_app_preset(cfg, snapshot_src={**cfg, "font_size": 52})
+    assert overwritten["font_size"] == 52
+    assert overwritten["app_presets"]["estudio"]["font_size"] == 52
+    assert changed_option_keys(
+        DOMAIN_APP, preset_values(DOMAIN_APP, overwritten, "estudio"), overwritten
+    ) == []
+
+
+def test_save_on_factory_preset_is_rejected() -> None:
+    cfg = apply_app_preset(validate_config({}), "video-en-es")
+    try:
+        save_app_preset(cfg, snapshot_src={**cfg, "font_size": 44})
+        raise AssertionError("expected factory overwrite rejected")
+    except ValueError as exc:
+        assert "fábrica" in str(exc).lower()

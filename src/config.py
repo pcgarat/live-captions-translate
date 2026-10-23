@@ -16,9 +16,14 @@ from src.presets import (
     is_factory_preset,
 )
 
-LATENCY_FACTORY_PRESETS: dict[str, dict[str, float | int]] = {
-    "stable": {"agreement_n": 2, "max_latency_sec": 0.8, "min_chunk_seconds": 0.8},
-    "low": {"agreement_n": 1, "max_latency_sec": 0.35, "min_chunk_seconds": 0.35},
+# `beam_size` viaja en el perfil para que un preset de latencia sea autocontenido:
+# antes se derivaba del nombre del modo (`stable` → 5, `low` → 1) y un preset de
+# usuario no podía elegirlo. Es lo único que no viene de `DEFAULTS`: allí un
+# perfil es un mapa plano de knobs y el beam es una decisión del catálogo.
+LATENCY_FACTORY_BEAMS: dict[str, int] = {"stable": 5, "low": 1}
+LATENCY_PRESET_LABELS: dict[str, str] = {
+    "stable": "Estable — más preciso",
+    "low": "Baja latencia — más rápido",
 }
 
 # Decoding NLLB (fábrica). `custom` no es fábrica: perfil editable persistente.
@@ -35,7 +40,12 @@ TRANSLATION_FACTORY_PRESETS: dict[str, dict[str, float | int]] = {
     "quality": {"beam_size": 6, "length_penalty": 0.7, "no_repeat_ngram_size": 3},
 }
 TRANSLATION_FACTORY_PRESET_IDS = frozenset(TRANSLATION_FACTORY_PRESETS)
-TRANSLATION_RESERVED_PRESET_IDS = TRANSLATION_FACTORY_PRESET_IDS | {"custom"}
+# `custom` es un preset propio especial: se puede sobrescribir, pero no borrar y
+# su nombre no se puede reutilizar.
+TRANSLATION_SPECIAL_PRESET_IDS = frozenset({"custom"})
+TRANSLATION_RESERVED_PRESET_IDS = (
+    TRANSLATION_FACTORY_PRESET_IDS | TRANSLATION_SPECIAL_PRESET_IDS
+)
 TRANSLATION_PRESET_LABELS: dict[str, str] = {
     "fast": "Rápido",
     "balanced": "Equilibrado",
@@ -45,6 +55,11 @@ TRANSLATION_PRESET_LABELS: dict[str, str] = {
 
 # Con traducción ON: qué mostrar como segunda línea (nunca más de 2 líneas de caption).
 SECOND_LINE_MODES = ("live_asr", "original", "none")
+SECOND_LINE_LABELS: dict[str, str] = {
+    "live_asr": "Reconocimiento en vivo",
+    "original": "Idioma original confirmado",
+    "none": "Nada",
+}
 
 # Alineación horizontal del texto en el overlay.
 TEXT_ALIGN_MODES = ("center", "left")
@@ -107,11 +122,13 @@ def _builtin_defaults() -> dict[str, Any]:
                 "agreement_n": 1,
                 "max_latency_sec": 0.4,
                 "min_chunk_seconds": 0.8,
+                "beam_size": 5,
             },
             "low": {
                 "agreement_n": 1,
                 "max_latency_sec": 1.5,
                 "min_chunk_seconds": 0.35,
+                "beam_size": 1,
             },
         },
         "installed_languages": list(AVAILABLE_LANGUAGES.keys()),
@@ -235,33 +252,78 @@ def _clamp_profile(
         "agreement_n": int(_clamp(int(src["agreement_n"]), 1, 5)),
         "max_latency_sec": float(_clamp(float(src["max_latency_sec"]), 0.2, 3.0)),
         "min_chunk_seconds": float(_clamp(float(src["min_chunk_seconds"]), 0.2, 5.0)),
+        "beam_size": int(_clamp(int(src["beam_size"]), 1, 8)),
     }
+
+
+def _latency_factory_presets() -> dict[str, dict[str, float | int]]:
+    """Presets de latencia de fábrica = `latency_profiles` de los defaults.
+
+    Se derivan para que una instalación nueva no nazca con un preset de fábrica
+    «modificado»: los knobs son los mismos que el usuario ve en su config, y lo
+    único que añade el catálogo es el `beam_size` de cada modo.
+    """
+    raw = DEFAULTS.get("latency_profiles")
+    raw = raw if isinstance(raw, dict) else {}
+    fallback = {"agreement_n": 1, "max_latency_sec": 0.4, "min_chunk_seconds": 0.8}
+    out: dict[str, dict[str, float | int]] = {}
+    for preset_id, beam in LATENCY_FACTORY_BEAMS.items():
+        saved = raw.get(preset_id)
+        base = saved if isinstance(saved, dict) else fallback
+        out[preset_id] = _clamp_profile(
+            {**base, "beam_size": beam}, {**fallback, "beam_size": beam}
+        )
+    return out
+
+
+LATENCY_FACTORY_PRESETS: dict[str, dict[str, float | int]] = _latency_factory_presets()
+LATENCY_FACTORY_PRESET_IDS = frozenset(LATENCY_FACTORY_PRESETS)
+
+
+LATENCY_LEGACY_PRESET_ID = "personalizado"
+
+_LATENCY_LEGACY_KNOBS = ("agreement_n", "max_latency_sec", "min_chunk_seconds")
+
+
+def _legacy_latency_knobs(data: dict[str, Any]) -> dict[str, Any]:
+    """Knobs de fase 1 que vivían sueltos en la raíz de la config."""
+    return {key: data[key] for key in _LATENCY_LEGACY_KNOBS if key in data}
 
 
 def _migrate_latency_profiles(
     data: dict[str, Any], mode: str
 ) -> dict[str, dict[str, float | int]]:
+    """Perfiles de latencia: fábrica inmutable + presets propios conservados.
+
+    Igual que los perfiles de decoding: las claves de fábrica se re-sincronizan
+    en cada validación, así que editarlas exige guardarlas con otro nombre. Los
+    presets propios se clampean contra `stable`, que actúa de referencia.
+    """
     profiles_in = data.get("latency_profiles")
     profiles: dict[str, dict[str, float | int]] = {
         name: deepcopy(preset) for name, preset in LATENCY_FACTORY_PRESETS.items()
     }
+    fallback = LATENCY_FACTORY_PRESETS["stable"]
 
     if isinstance(profiles_in, dict):
-        for name, factory in LATENCY_FACTORY_PRESETS.items():
-            profiles[name] = _clamp_profile(profiles_in.get(name), factory)
+        for name, raw in profiles_in.items():
+            key = _normalize_latency_preset_id(name)
+            if (
+                not key
+                or key in LATENCY_FACTORY_PRESET_IDS
+                or not isinstance(raw, dict)
+            ):
+                continue
+            profiles[key] = _clamp_profile(raw, fallback)
         return profiles
 
-    # Config fase 1: knobs top-level alimentan el modo activo; el otro modo queda de fábrica.
-    legacy: dict[str, Any] = {}
-    if "agreement_n" in data:
-        legacy["agreement_n"] = data["agreement_n"]
-    if "min_chunk_seconds" in data:
-        legacy["min_chunk_seconds"] = data["min_chunk_seconds"]
-    if "max_latency_sec" in data:
-        legacy["max_latency_sec"] = data["max_latency_sec"]
+    # Config fase 1: los knobs top-level pasan a un preset propio visible, para
+    # no perder silenciosamente los valores que el usuario tenía puestos.
+    legacy = _legacy_latency_knobs(data)
     if legacy:
-        profiles[mode] = _clamp_profile(
-            {**LATENCY_FACTORY_PRESETS[mode], **legacy}, LATENCY_FACTORY_PRESETS[mode]
+        profiles[LATENCY_LEGACY_PRESET_ID] = _clamp_profile(
+            {**LATENCY_FACTORY_PRESETS[mode], **legacy},
+            LATENCY_FACTORY_PRESETS[mode],
         )
     return profiles
 
@@ -279,37 +341,149 @@ def _latency_profiles_migrate_source(
     return {"latency_profiles": cfg.get("latency_profiles")}
 
 
-def effective_latency_profile(cfg: dict[str, Any]) -> dict[str, float | int]:
-    mode = str(cfg.get("latency_mode", "stable"))
-    if mode not in LATENCY_FACTORY_PRESETS:
-        mode = "stable"
-    profiles = cfg.get("latency_profiles") or LATENCY_FACTORY_PRESETS
-    raw = profiles.get(mode) if isinstance(profiles, dict) else None
-    return _clamp_profile(
-        raw if isinstance(raw, dict) else None, LATENCY_FACTORY_PRESETS[mode]
+def _normalize_latency_preset_id(raw: Any) -> str:
+    return slugify_translation_preset_name(str(raw or ""))
+
+
+def latency_user_preset_ids(cfg: dict[str, Any]) -> list[str]:
+    profiles = cfg.get("latency_profiles")
+    if not isinstance(profiles, dict):
+        return []
+    return sorted(
+        key
+        for key in (_normalize_latency_preset_id(name) for name in profiles)
+        if key and key not in LATENCY_FACTORY_PRESET_IDS
     )
 
 
-def reset_latency_profile(
-    cfg: dict[str, Any], mode: str | None = None
+def latency_preset_label(preset_id: str) -> str:
+    key = _normalize_latency_preset_id(preset_id)
+    return LATENCY_PRESET_LABELS.get(key, key)
+
+
+def is_factory_latency_preset(preset_id: str | None) -> bool:
+    return _normalize_latency_preset_id(preset_id) in LATENCY_FACTORY_PRESET_IDS
+
+
+def effective_latency_profile(cfg: dict[str, Any]) -> dict[str, float | int]:
+    mode = _normalize_latency_preset_id(cfg.get("latency_mode") or "stable")
+    profiles = cfg.get("latency_profiles")
+    if not isinstance(profiles, dict):
+        profiles = LATENCY_FACTORY_PRESETS
+    raw = profiles.get(mode)
+    if not isinstance(raw, dict):
+        mode = "stable"
+        raw = profiles.get(mode)
+    return _clamp_profile(
+        raw if isinstance(raw, dict) else None,
+        LATENCY_FACTORY_PRESETS.get(mode, LATENCY_FACTORY_PRESETS["stable"]),
+    )
+
+
+def restore_latency_preset(
+    cfg: dict[str, Any], preset_id: str | None = None
 ) -> dict[str, Any]:
+    """Devuelve el preset a sus valores de referencia (fábrica o guardados)."""
     out = deepcopy(cfg)
-    active = mode or str(out.get("latency_mode", "stable"))
-    if active not in LATENCY_FACTORY_PRESETS:
-        active = "stable"
+    active = _normalize_latency_preset_id(preset_id or out.get("latency_mode"))
     profiles = out.get("latency_profiles")
     if not isinstance(profiles, dict):
         profiles = deepcopy(LATENCY_FACTORY_PRESETS)
     else:
         profiles = deepcopy(profiles)
-    profiles[active] = deepcopy(LATENCY_FACTORY_PRESETS[active])
+    if active in LATENCY_FACTORY_PRESET_IDS:
+        profiles[active] = deepcopy(LATENCY_FACTORY_PRESETS[active])
     out["latency_profiles"] = profiles
     out["latency_mode"] = active
     return validate_config(out)
 
 
-def beam_size_for_mode(mode: str) -> int:
-    return 1 if mode == "low" else 5
+def reset_latency_profile(
+    cfg: dict[str, Any], mode: str | None = None
+) -> dict[str, Any]:
+    """Compatibilidad: restaura el modo a sus valores de fábrica."""
+    return restore_latency_preset(cfg, mode)
+
+
+def save_latency_preset(
+    cfg: dict[str, Any],
+    preset_id: str | None,
+    profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Sobrescribe un preset propio y lo deja activo. Fábrica → ValueError."""
+    out = deepcopy(cfg)
+    key = _normalize_latency_preset_id(preset_id or out.get("latency_mode"))
+    if not key:
+        raise ValueError("No hay preset de latencia activo")
+    if key in LATENCY_FACTORY_PRESET_IDS:
+        raise ValueError(f"El preset de fábrica «{key}» no se puede sobrescribir")
+    profiles = out.get("latency_profiles")
+    if not isinstance(profiles, dict):
+        profiles = deepcopy(LATENCY_FACTORY_PRESETS)
+    else:
+        profiles = deepcopy(profiles)
+    if key not in profiles:
+        raise ValueError(f"Preset de latencia desconocido: {key}")
+    # Los knobs no enviados conservan lo que ya tenía el preset: sobrescribir
+    # desde la UI manda solo lo que los sliders pueden editar.
+    base = profiles[key] if isinstance(profiles[key], dict) else None
+    profiles[key] = _clamp_profile(
+        {**base, **profile} if isinstance(profile, dict) and base else profile,
+        LATENCY_FACTORY_PRESETS["stable"],
+    )
+    out["latency_profiles"] = profiles
+    out["latency_mode"] = key
+    return validate_config(out)
+
+
+def save_latency_preset_as(
+    cfg: dict[str, Any],
+    name: str,
+    profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    slug = _normalize_latency_preset_id(name)
+    if not slug:
+        raise ValueError("Nombre de preset vacío o inválido")
+    if slug in LATENCY_FACTORY_PRESET_IDS:
+        raise ValueError(f"El nombre «{slug}» está reservado")
+    out = deepcopy(cfg)
+    profiles = out.get("latency_profiles")
+    if not isinstance(profiles, dict):
+        profiles = deepcopy(LATENCY_FACTORY_PRESETS)
+    else:
+        profiles = deepcopy(profiles)
+    if slug in profiles:
+        raise ValueError(f"Ya existe un preset «{slug}»")
+    profiles[slug] = _clamp_profile(
+        profile if isinstance(profile, dict) else effective_latency_profile(out),
+        LATENCY_FACTORY_PRESETS["stable"],
+    )
+    out["latency_profiles"] = profiles
+    out["latency_mode"] = slug
+    return validate_config(out)
+
+
+def delete_latency_user_preset(
+    cfg: dict[str, Any], preset_id: str | None = None
+) -> dict[str, Any]:
+    out = deepcopy(cfg)
+    key = _normalize_latency_preset_id(preset_id or out.get("latency_mode"))
+    if not key:
+        raise ValueError("No hay preset de latencia para borrar")
+    if key in LATENCY_FACTORY_PRESET_IDS:
+        raise ValueError(f"El preset de fábrica «{key}» no se puede borrar")
+    profiles = out.get("latency_profiles")
+    if not isinstance(profiles, dict):
+        profiles = deepcopy(LATENCY_FACTORY_PRESETS)
+    else:
+        profiles = deepcopy(profiles)
+    if key not in profiles:
+        raise ValueError(f"Preset de latencia desconocido: {key}")
+    del profiles[key]
+    out["latency_profiles"] = profiles
+    if _normalize_latency_preset_id(out.get("latency_mode")) == key:
+        out["latency_mode"] = "stable"
+    return validate_config(out)
 
 
 def _clamp_translation_decode(
@@ -392,6 +566,22 @@ def slugify_translation_preset_name(name: str) -> str:
     return slug
 
 
+def restore_translation_preset(
+    cfg: dict[str, Any], preset_id: str | None = None
+) -> dict[str, Any]:
+    """Devuelve el preset a sus valores de referencia (fábrica o guardados).
+
+    Como los valores guardados ya están en config, restaurar es solo dejar de
+    usar el borrador de la UI; este helper existe para que config sea la única
+    fuente de verdad y para los presets de fábrica.
+    """
+    out = deepcopy(cfg)
+    key = str(preset_id or out.get("translation_decode_preset") or "balanced")
+    key = key.strip().lower() or "balanced"
+    out["translation_decode_preset"] = key
+    return validate_config(out)
+
+
 def add_translation_user_preset(
     cfg: dict[str, Any],
     name: str,
@@ -440,15 +630,53 @@ def delete_translation_user_preset(
     return validate_config(out)
 
 
+def is_factory_translation_preset(preset_id: str | None) -> bool:
+    return str(preset_id or "").strip().lower() in TRANSLATION_FACTORY_PRESET_IDS
+
+
+def is_deletable_translation_preset(preset_id: str | None) -> bool:
+    """Un preset propio se puede borrar; fábrica y `custom` (del sistema) no."""
+    key = str(preset_id or "").strip().lower()
+    return bool(key) and key not in TRANSLATION_RESERVED_PRESET_IDS
+
+
 def translation_user_preset_ids(cfg: dict[str, Any]) -> list[str]:
+    """Presets propios, incluido `custom` (el selector lo muestra con su label)."""
     profiles = cfg.get("translation_profiles")
     if not isinstance(profiles, dict):
         return []
     return sorted(
         key
         for key in profiles
-        if str(key).strip().lower() not in TRANSLATION_RESERVED_PRESET_IDS
+        if str(key).strip().lower() not in TRANSLATION_FACTORY_PRESET_IDS
     )
+
+
+def save_translation_preset(
+    cfg: dict[str, Any],
+    preset_id: str,
+    decode: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Sobrescribe un preset propio (incluido `custom`). Fábrica → ValueError."""
+    key = str(preset_id or "").strip().lower()
+    if not key:
+        raise ValueError("No hay preset de decoding activo")
+    if key in TRANSLATION_FACTORY_PRESET_IDS:
+        raise ValueError(
+            f"El preset de fábrica «{key}» no se puede sobrescribir; "
+            "guárdalo con otro nombre."
+        )
+    out = deepcopy(cfg)
+    profiles = _migrate_translation_profiles(out)
+    if key not in profiles:
+        raise ValueError(f"Preset desconocido: {key}")
+    profiles[key] = _clamp_translation_decode(
+        decode if isinstance(decode, dict) else effective_translation_decode(out),
+        TRANSLATION_FACTORY_PRESETS["balanced"],
+    )
+    out["translation_profiles"] = profiles
+    out["translation_decode_preset"] = key
+    return validate_config(out)
 
 
 def _normalize_installed_languages(raw: Any, language: str) -> list[str]:
@@ -541,8 +769,7 @@ def snapshot_app_config(
     return {
         key: deepcopy(value)
         for key, value in validated.items()
-        if key not in APP_PRESET_META_KEYS
-        and (allowed is None or key in allowed)
+        if key not in APP_PRESET_META_KEYS and (allowed is None or key in allowed)
     }
 
 
@@ -584,12 +811,14 @@ def _normalize_app_presets(raw: Any) -> dict[str, dict[str, Any]]:
         return {}
     out: dict[str, dict[str, Any]] = {}
     seen_lower: set[str] = set()
+    factory_lower = {pid.lower() for pid in APP_FACTORY_PRESET_IDS}
     for key, blob in raw.items():
         name = str(key).strip()
         if not name or not isinstance(blob, dict):
             continue
         low = name.lower()
-        if low in seen_lower:
+        # Un id de fábrica escrito con otra caja lo sustituye su snapshot canónico.
+        if low in seen_lower or low in factory_lower:
             continue
         seen_lower.add(low)
         # `keys=blob` conserva la parcialidad de los presets que la tengan.
@@ -597,7 +826,9 @@ def _normalize_app_presets(raw: Any) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _normalize_app_preset_id(raw: Any, presets: dict[str, dict[str, Any]]) -> str | None:
+def _normalize_app_preset_id(
+    raw: Any, presets: dict[str, dict[str, Any]]
+) -> str | None:
     if raw is None:
         return None
     key = str(raw).strip()
@@ -648,7 +879,7 @@ def apply_app_preset(cfg: dict[str, Any], preset_id: str | None) -> dict[str, An
 def save_app_preset(
     cfg: dict[str, Any], snapshot_src: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Sobrescribe el preset activo con el snapshot indicado (o el propio cfg)."""
+    """Sobrescribe el preset **propio** activo. Los de fábrica son inmutables."""
     out = validate_config(deepcopy(cfg))
     preset_id = out.get("app_preset")
     presets = out.get("app_presets")
@@ -656,11 +887,18 @@ def save_app_preset(
         raise ValueError("No hay preset activo para sobrescribir")
     if not isinstance(presets, dict) or preset_id not in presets:
         raise ValueError(f"Preset activo desconocido: {preset_id}")
+    if is_factory_preset(preset_id):
+        raise ValueError(
+            f"El preset de fábrica «{preset_id}» no se puede sobrescribir; "
+            "guárdalo con otro nombre."
+        )
     src = snapshot_src if snapshot_src is not None else out
     presets = deepcopy(presets)
     presets[preset_id] = snapshot_app_config(src)
     out["app_presets"] = presets
-    return validate_config(out)
+    # El estado vivo absorbe lo guardado: si no, el preset recién guardado nace
+    # ya «modificado» respecto a una config que se quedó en los valores viejos.
+    return validate_config({**out, **deepcopy(presets[preset_id])})
 
 
 def save_app_preset_as(
@@ -682,7 +920,8 @@ def save_app_preset_as(
     presets[slug] = snapshot_app_config(src)
     out["app_presets"] = presets
     out["app_preset"] = slug
-    return validate_config(out)
+    # Igual que al sobrescribir: el estado vivo pasa a ser el del preset nuevo.
+    return validate_config({**out, **deepcopy(presets[slug])})
 
 
 def delete_app_preset(
@@ -746,9 +985,9 @@ def validate_config(
     cfg["model"] = str(cfg["model"]).strip() or "medium"
     compute = str(cfg.get("compute_type") or "float16").strip().lower()
     cfg["compute_type"] = compute if compute in COMPUTE_TYPES else "float16"
-    cfg["latency_mode"] = str(cfg.get("latency_mode", "stable"))
-    if cfg["latency_mode"] not in LATENCY_FACTORY_PRESETS:
-        cfg["latency_mode"] = "stable"
+    cfg["latency_mode"] = _normalize_latency_preset_id(
+        cfg.get("latency_mode") or "stable"
+    )
     cfg["use_vad"] = bool(cfg["use_vad"])
     cfg["always_on_top"] = bool(cfg.get("always_on_top", True))
     cfg["debug_hud"] = bool(cfg.get("debug_hud", False))
@@ -777,6 +1016,14 @@ def validate_config(
         _latency_profiles_migrate_source(raw, cfg),
         cfg["latency_mode"],
     )
+    latency_mode = _normalize_latency_preset_id(cfg.get("latency_mode"))
+    if "latency_profiles" not in raw and _legacy_latency_knobs(raw):
+        # Los knobs sueltos de fase 1 viven en un preset propio: son valores del
+        # usuario y la fábrica ya no se puede editar en sitio.
+        latency_mode = LATENCY_LEGACY_PRESET_ID
+    cfg["latency_mode"] = (
+        latency_mode if latency_mode in cfg["latency_profiles"] else "stable"
+    )
     cfg["translation_profiles"] = _migrate_translation_profiles(raw)
     cfg["translation_decode_preset"] = _normalize_translation_decode_preset(
         cfg.get("translation_decode_preset"),
@@ -801,12 +1048,11 @@ def validate_config(
         raw.get("app_presets") if "app_presets" in raw else cfg.get("app_presets")
     )
     presets = _normalize_app_presets(presets_raw)
-    # Siembra: los de fábrica que falten (alta nueva o versión que añade presets).
-    # Solo rellena huecos, así que sobrescribir uno con «Guardar» persiste.
-    existing = {key.lower() for key in presets}
-    for preset_id, snapshot in factory_app_presets().items():
-        if preset_id.lower() not in existing:
-            presets[preset_id] = snapshot
+    # Fábrica inmutable: se re-sincroniza siempre desde el catálogo, así que una
+    # copia editada de un preset de fábrica en disco no sobrevive a validar.
+    factory = factory_app_presets()
+    for preset_id, snapshot in factory.items():
+        presets[preset_id] = snapshot
     cfg["app_presets"] = presets
     preset_id_raw = (
         raw.get("app_preset") if "app_preset" in raw else cfg.get("app_preset")

@@ -504,16 +504,22 @@ El modo selecciona el perfil; los knobs efectivos viven en
 validar y existen solo por compatibilidad: editarlos no tiene efecto si el perfil dice
 otra cosa.
 
-Hay dos conjuntos de valores que conviene no mezclar: el perfil que trae la configuración
-distribuida y el de fábrica al que vuelve **Restablecer modo**.
+Los dos presets de fábrica **se derivan de `config.example.json`** más el `beam_size` del
+catálogo (`LATENCY_FACTORY_BEAMS`). Una instalación nueva no nace con el preset de fábrica
+ya «modificado» y solo hay un conjunto de valores que mantener.
 
-| Modo | Config distribuida (`agreement_n` / `max_latency_sec` / `min_chunk_seconds`) | Fábrica (Restablecer modo) | `beam_size` Whisper |
-| --- | --- | --- | --- |
-| `stable` | 1 / 0.4 s / 0.8 s | 2 / 0.8 s / 0.8 s | 5 |
-| `low` | 1 / 1.5 s / 0.35 s | 1 / 0.35 s / 0.35 s | 1 |
+| Modo | `agreement_n` | `max_latency_sec` | `min_chunk_seconds` | `beam_size` Whisper |
+| --- | --- | --- | --- | --- |
+| `stable` | 1 | 0.4 s | 0.8 s | 5 |
+| `low` | 1 | 1.5 s | 0.35 s | 1 |
+
+Los ids extra en `latency_profiles` son presets **propios**: se sobrescriben, se borran y
+`latency_mode` apunta a cualquiera de ellos. La fábrica es inmutable y se re-sincroniza en
+cada `validate_config`. Una config de fase 1 con los knobs sueltos en la raíz migra a un
+preset propio `personalizado`.
 
 Clamps: `agreement_n` ∈ [1, 5], `max_latency_sec` ∈ [0.2, 3.0] s,
-`min_chunk_seconds` ∈ [0.2, 5.0] s.
+`min_chunk_seconds` ∈ [0.2, 5.0] s, `beam_size` ∈ [1, 8].
 
 ### 9.3 Traducción
 
@@ -523,8 +529,9 @@ Clamps: `agreement_n` ∈ [1, 5], `max_latency_sec` ∈ [0.2, 3.0] s,
 | `translation_target` | `es` | Idioma destino |
 | `translation_sticky_mode` | `committed` | `off` \| `committed` \| `partials` |
 | `translator_model` | `opus-mt-tc-big` | Motor, alias o repositorio CT2 arbitrario |
+| `latency_profiles` | `stable` / `low` (+ propios) | Perfiles de latencia; cada uno incluye `beam_size` |
 | `translation_decode_preset` | `balanced` | Perfil de decodificación activo |
-| `translation_profiles` | fast / balanced / quality / custom | Knobs de decodificación |
+| `translation_profiles` | fast / balanced / quality / custom (+ propios) | Knobs de decodificación |
 | `installed_languages` | `en, es, fr, de, it, pt` | Idiomas del menú del overlay |
 | `second_line_mode` | `none` | Composición de la segunda línea |
 | `captions_show_partials` | `false` | Ver §7.3 |
@@ -579,10 +586,36 @@ Dos semánticas distintas bajo el mismo selector:
 | `video-*` (9) | **Overrides** parciales: idioma + bloque de modelos + presentación | Hereda posición, tipografía, modo de latencia y dispositivo del usuario |
 | Definidos por el usuario | Snapshot completo vía *Guardar como…* | Restauración total |
 
-Los de fábrica no se pueden borrar, pero sí sobrescribir con **Guardar**. Cambiar el
-selector aplica de inmediato y reinicia el ASR solo si el diff lo exige. Una configuración
-preexistente no se pisa: los presets nuevos se añaden y los valores del usuario se
-conservan.
+Los de fábrica son **inmutables**: no se borran ni se sobrescriben (`save_app_preset`
+lanza `ValueError` y la UI no ofrece guardar sobre ellos). Cambiar el selector aplica de
+inmediato y reinicia el ASR solo si el diff lo exige. Una configuración preexistente no se
+pisa: los presets nuevos se añaden y los valores del usuario se conservan.
+
+### 9.6 Ciclo de vida de los presets en la UI
+
+Los tres selectores (general, latencia y decoding) comparten las mismas acciones, definidas
+en `src/ui/presets_ui.py` y decididas por el estado del preset:
+
+| Estado | Botones junto al selector |
+| --- | --- |
+| Fábrica sin cambios | Ver valores |
+| Fábrica modificada | Ver valores · Guardar como nuevo · Restaurar |
+| Propio sin cambios | Ver valores · Borrar |
+| Propio modificado | Ver valores · Guardar · Restaurar · Borrar |
+| `(ninguno)` | Guardar como nuevo |
+
+*Modificado* significa que alguna opción **que fija el preset** difiere del estado vivo;
+lo calcula `src/preset_state.py` a partir de un catálogo de opciones por dominio. Quedan
+fuera geometría, `installed_languages`, los espejos de latencia y los flags `opt_*`, porque
+cambian solos y marcarían el preset sucio de forma permanente. Un `audio_monitor` vacío en
+el preset tampoco cuenta: al arrancar sin dispositivo la app elige el primero.
+
+Guardar sobre un preset propio pregunta si sobrescribir o crear uno nuevo; «Guardar como
+nuevo» nunca sobrescribe un id existente. Restaurar devuelve los valores **del preset**, no
+los de fábrica globales. Editar los sliders de latencia o decoding no cambia el preset
+seleccionado ni salta a `custom`: escribe en un borrador en memoria que se persiste al
+aceptar el diálogo si el preset es propio. Con un preset de fábrica modificado, aceptar
+ofrece guardar como nuevo, descartar o cancelar.
 
 ---
 
@@ -789,6 +822,9 @@ Los commits siguen Conventional Commits con el cuerpo en español.
 - [ ] Arranque con GPU disponible y primera confirmación en menos de 3 s con vídeo real
 - [ ] Sesión de ≥ 30 min sin degradación de UI ni crecimiento del ring
 - [ ] Cambio de preset de vídeo sin mover ni redimensionar el overlay
+- [ ] Ciclo de presets en los tres selectores: fábrica sin «Guardar», modificar →
+      «Guardar como nuevo» + «Restaurar», «Ver valores» siempre disponible
+- [ ] Un preset de fábrica modificado sobrevive a reiniciar la app sin quedar escrito
 - [ ] `video-es` transcribe sin instanciar traductor
 - [ ] VRAM total por debajo de 8 GB con navegador reproduciendo (`nvidia-smi`)
 - [ ] `rtf` p95 por debajo de 1.0 en el resumen de trazas
@@ -799,9 +835,9 @@ Los commits siguen Conventional Commits con el cuerpo en español.
 
 ## 15. Invariantes críticas y modos de fallo
 
-1. **Hay dos `beam_size` y no son el mismo.** El de Whisper lo deriva `latency_mode`; el
-   del traductor viene del perfil de decodificación. Tocar uno creyendo tocar el otro es el
-   error de diagnóstico más frecuente.
+1. **Hay dos `beam_size` y no son el mismo.** El de Whisper viene del perfil de latencia
+   activo (`latency_profiles[latency_mode]`); el del traductor, del perfil de decoding.
+   Tocar uno creyendo tocar el otro es el error de diagnóstico más frecuente.
 2. **Whisper no traduce nunca.** `task` es siempre `transcribe`, incluso con origen y
    destino distintos. El español lo produce el motor de traducción, o es passthrough.
 3. **Ventana creciente, no sliding window.** Cada inferencia ve casi todo el ring hasta el

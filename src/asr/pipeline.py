@@ -15,7 +15,6 @@ from src.audio.backends import AudioStream
 from src.audio.capture import AudioRingBuffer, ChunkPump
 from src.audio.devices import resolve_backend
 from src.config import (
-    beam_size_for_mode,
     effective_latency_profile,
     effective_translation_decode,
 )
@@ -152,7 +151,6 @@ class AsrPipeline:
             )
 
         profile = effective_latency_profile(self.config)
-        mode = str(self.config.get("latency_mode", "stable"))
         buffer = AudioRingBuffer(
             max_seconds=float(self.config.get("buffer_trimming_sec", 15.0)) + 5.0
         )
@@ -163,7 +161,7 @@ class AsrPipeline:
             compute_type=str(self.config.get("compute_type", "float16")),
             language=str(self.config.get("language", "en")),
             use_vad=bool(self.config.get("use_vad", True)),
-            beam_size=beam_size_for_mode(mode),
+            beam_size=int(profile["beam_size"]),
         )
         self._engine.load()
         self._preload_translator()
@@ -243,13 +241,12 @@ class AsrPipeline:
             if key in config:
                 self.config[key] = config[key]
         profile = effective_latency_profile(self.config)
-        mode = str(self.config.get("latency_mode", "stable"))
         self._streamer.agreement_n = max(1, int(profile["agreement_n"]))
         self._streamer.max_latency_sec = max(0.2, float(profile["max_latency_sec"]))
         if self._pump is not None:
             self._pump.min_chunk_seconds = float(profile["min_chunk_seconds"])
         if self._engine is not None:
-            self._engine.beam_size = beam_size_for_mode(mode)
+            self._engine.beam_size = int(profile["beam_size"])
 
     def apply_translation_settings(self, config: dict[str, Any]) -> None:
         """Hot-swap de flags/decode; recrea Translator solo si cambia motor/enable."""
